@@ -156,6 +156,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		DPrintf("(RequestVote handler false, term outdated) %v(term: %v)->%v(term: %v)\n", 
+				args.CandidateId, args.Term, rf.me, rf.currentTerm)
 		return 
 	}
 
@@ -167,11 +169,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
+		DPrintf("(RequestVote handler true) %v(term: %v)->%v(term: %v)\n", 
+				args.CandidateId, args.Term, rf.me, rf.currentTerm)
 		return 
 	}
 
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false 
+	DPrintf("(RequestVote handler false, already voted %v) %v(term: %v)->%v(term: %v)\n", 
+				rf.votedFor, args.CandidateId, args.Term, rf.me, rf.currentTerm)
 }
 
 type AppendEntriesArgs struct {
@@ -302,9 +308,11 @@ func (rf *Raft) waitElectionTimeout() {
 		rf.state = CandidateState
 	}
 	rf.mu.Unlock()
+	DPrintf("%v electionTimeout, state: %v, term: %v\n", rf.me, rf.state, rf.currentTerm)
 }
 
 func (rf *Raft) voteForLeader() {
+	DPrintf("(voteForLeader %v), state: %v, term: %v\n", rf.me, rf.state, rf.currentTerm)
 	args := RequestVoteArgs{}
 	
 	rf.mu.Lock()
@@ -345,6 +353,8 @@ func (rf *Raft) voteForLeader() {
 					rf.state = FollowerState
 				}
 			}
+			DPrintf("%v:get %v votes(total %v, votedFor %v), state: %v\n", 
+				rf.me, getVote, serverTotal, rf.votedFor, rf.state)
 		}(i)
 	}
 	electionTimeoutMs := electionTimeoutLeft + rand.Intn(electionTimeoutLength)
@@ -352,6 +362,7 @@ func (rf *Raft) voteForLeader() {
 }
 
 func (rf *Raft) sendHeartbeats() {
+	DPrintf("(sendHeartbeats) %v, term: %v\n", rf.me, rf.currentTerm)
 	serverTotal := len(rf.peers)
 			
 	args := AppendEntriesArgs{}
@@ -376,6 +387,7 @@ func (rf *Raft) sendHeartbeats() {
 				if rf.currentTerm < args.Term {
 					rf.state = FollowerState
 					rf.currentTerm = reply.Term
+					DPrintf("(sendHeartbeats)%v is follower, term: %v\n", rf.me, rf.currentTerm)
 				}
 				rf.mu.Unlock()
 			}
