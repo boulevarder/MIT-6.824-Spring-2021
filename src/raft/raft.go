@@ -313,6 +313,11 @@ func (rf *Raft) waitElectionTimeout() {
 
 func (rf *Raft) voteForLeader() {
 	DPrintf("(voteForLeader %v), state: %v, term: %v\n", rf.me, rf.state, rf.currentTerm)
+
+	cond := sync.NewCond(new(sync.Mutex))
+	cond.L.Lock()
+	defer cond.L.Unlock()
+
 	args := RequestVoteArgs{}
 	
 	rf.mu.Lock()
@@ -344,8 +349,7 @@ func (rf *Raft) voteForLeader() {
 				getVote++
 				if getVote > serverTotal / 2 && rf.state == CandidateState {
 					rf.state = LeaderState
-
-					go rf.sendHeartbeats()
+					cond.Signal()
 				}
 			} else {
 				if reply.Term > rf.currentTerm {
@@ -353,12 +357,18 @@ func (rf *Raft) voteForLeader() {
 					rf.state = FollowerState
 				}
 			}
-			DPrintf("%v:get %v votes(total %v, votedFor %v), state: %v\n", 
-				rf.me, getVote, serverTotal, rf.votedFor, rf.state)
 		}(i)
 	}
-	electionTimeoutMs := electionTimeoutLeft + rand.Intn(electionTimeoutLength)
-	time.Sleep(time.Millisecond * time.Duration(electionTimeoutMs))
+
+	go func() {
+		electionTimeoutMs := electionTimeoutLeft + rand.Intn(electionTimeoutLength)
+		time.Sleep(time.Millisecond * time.Duration(electionTimeoutMs))
+		cond.Signal()
+	} ()
+	cond.Wait()
+
+	DPrintf("%v:get %v votes(total %v, votedFor %v), state: %v\n", 
+		rf.me, getVote, serverTotal, rf.votedFor, rf.state)
 }
 
 func (rf *Raft) sendHeartbeats() {
