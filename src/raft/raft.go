@@ -90,7 +90,7 @@ func (rf *Raft) GetState() (int, bool) {
 
 	// Your code here (2A).
 	rf.mu.Lock()
-	rf.mu.Unlock()
+	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.state == LeaderState
 }
 
@@ -427,8 +427,11 @@ func (rf *Raft) voteForLeader() {
 	} ()
 	cond.Wait()
 
+	// 这里可以不加锁, 但为了-race不报错, 加锁(因为只是log)
+	rf.mu.Lock()
 	DPrintf("%v:get %v votes(total %v, votedFor %v), state: %v\n", 
 		rf.me, getVote, serverTotal, rf.votedFor, rf.state)
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) sendHeartbeats() {

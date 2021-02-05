@@ -5,6 +5,7 @@ https://pdos.csail.mit.edu/6.824/
 - [x] MapReduce - 2021.1.31
 - [ ] Raft
 	- [x] Part A: leader election - 2020.2.4
+	- [ ] Part B: log
 - [ ] Raft K/V Service
 - [ ] Sharded K/V Service
 	- [ ] Part A
