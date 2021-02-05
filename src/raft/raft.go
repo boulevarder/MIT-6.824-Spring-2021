@@ -53,6 +53,11 @@ const (
 	LeaderState		RaftState = 2
 )
 
+type logType struct {
+	command		interface{}
+	logTerm		int 
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -68,9 +73,15 @@ type Raft struct {
 	// state a Raft server must maintain.
 	haveMessagePeriod 	bool
 	state			RaftState
+	applyCh			chan ApplyMsg
 
 	currentTerm		int
 	votedFor		int 
+	logs 			[]logType
+
+	commitIndex		int 
+
+	nextIndex		[]int
 }
 
 // return currentTerm and whether this server
@@ -133,6 +144,8 @@ type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	Term 			int
 	CandidateId		int
+	LastLogIndex	int
+	LastLogTerm		int 
 }
 
 //
@@ -148,7 +161,7 @@ type RequestVoteReply struct {
 //
 // example RequestVote RPC handler.
 //
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote_2A(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -179,6 +192,51 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	DPrintf("(RequestVote handler false, already voted %v) %v(term: %v)->%v(term: %v)\n", 
 				rf.votedFor, args.CandidateId, args.Term, rf.me, rf.currentTerm)
 }
+
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		DPrintf("(RequestVote handler false, term outdated) %v(term: %v)->%v(term: %v)\n", 
+				args.CandidateId, args.Term, rf.me, rf.currentTerm)
+		return 	
+	}
+
+	if rf.currentTerm < args.Term || rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+		if rf.currentTerm < args.Term {
+			// If RPC request or response contains term T > currentTerm: 
+			// set currentTerm = T, convert to follower
+			rf.state = FollowerState
+			rf.currentTerm = args.Term
+		}
+
+		reply.Term = rf.currentTerm
+		lastLogIndex := rf.commitIndex
+		lastLogTerm := rf.logs[lastLogIndex].logTerm
+		// election restriction
+		if lastLogTerm < args.LastLogTerm || (lastLogTerm == args.LastLogTerm && lastLogIndex <= args.LastLogIndex) {
+			reply.VoteGranted = true
+			DPrintf("(RequestVote handler true) %v(term: %v, log index: %v, log term: %v)->%v(term: %v, log index: %v, log term: %v), \n", 
+				args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm, 
+				rf.me, rf.currentTerm, lastLogIndex, lastLogTerm)
+			return
+		}
+
+		reply.VoteGranted = false 
+		DPrintf("(RequestVote handler false, log outdated) %v(term: %v, log index: %v, log term: %v)->%v(term: %v, log index: %v, log term: %v), \n", 
+			args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm, 
+			rf.me, rf.currentTerm, lastLogIndex, lastLogTerm)
+		return 
+	}
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false 
+	DPrintf("(RequestVote handler false, already voted %v) %v(term: %v)->%v(term: %v)\n", 
+				rf.votedFor, args.CandidateId, args.Term, rf.me, rf.currentTerm)
+}
+
 
 type AppendEntriesArgs struct {
 	Term 		int 
@@ -263,7 +321,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
+	
 
 	return index, term, isLeader
 }
@@ -326,6 +384,8 @@ func (rf *Raft) voteForLeader() {
 
 	args.Term = rf.currentTerm
 	args.CandidateId = rf.me
+	args.LastLogIndex = rf.commitIndex
+	args.LastLogTerm = rf.logs[rf.commitIndex].logTerm
 	rf.mu.Unlock()
 
 	getVote := 1
@@ -451,7 +511,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FollowerState
 	rf.currentTerm = 0
 	rf.votedFor = -1
-
+	
+	rf.applyCh = applyCh
+	rf.logs = make([]logType, 1)
+	rf.logs[0].logTerm = 0
+	rf.commitIndex = 0
+	rf.nextIndex = make([]int, len(rf.peers))
 	go rf.bgRoutine()
 
 	// initialize from state persisted before a crash
