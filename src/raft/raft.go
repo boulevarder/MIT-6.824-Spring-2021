@@ -544,6 +544,7 @@ func (rf *Raft) voteForLeader() {
 }
 
 func (rf *Raft) sendHeartbeatToServer(i int, args *AppendEntriesArgs) {
+	DPrintf("(sendHeartbeatToServer) %v->%v", rf.me, i)
 	rf.mu.Lock()
 	curPrevLogIndex := rf.nextIndex[i]-1
 	args.LeaderCommit = rf.commitIndex
@@ -585,8 +586,11 @@ func (rf *Raft) sendHeartbeatToServer(i int, args *AppendEntriesArgs) {
 			rf.nextIndex[i] = args.PrevLogIndex + 2
 		} else {
 			if reply.Term > args.Term {
-				rf.currentTerm = reply.Term
-				rf.state = FollowerState
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.state = FollowerState
+				}
+
 				DPrintf("(sendHeartbeat fail) %v becomes follower, term: %v, %v->%v,", rf.me, rf.currentTerm, rf.me, i)
 				rf.mu.Unlock()
 				return 
@@ -618,7 +622,6 @@ func (rf *Raft) sendHeartbeats() {
 			args.Term = term
 			args.LeaderId = rf.me 
 			for {
-				rf.sendHeartbeatToServer(i, &args)
 
 				rf.mu.Lock()
 				if rf.state != LeaderState || rf.killed() {
@@ -627,6 +630,8 @@ func (rf *Raft) sendHeartbeats() {
 					return 
 				}
 				rf.mu.Unlock()
+
+				go rf.sendHeartbeatToServer(i, &args)
 
 				time.Sleep(time.Millisecond * time.Duration(heartbeatsInterval))
 			}
