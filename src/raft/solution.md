@@ -11,4 +11,4 @@
 - A: 之前leader实现了绝大多数server获取到当前log, 才提交。而follower没有实现, 忽略了LeaderCommit的作用
 
 - Q: 总是出现指针越界?
-- A: 不要依赖当前状态去更新nextIndex, 要用RPC的lastLogIndex
+- A: 不要依赖当前状态去更新nextIndex, 要用RPC的lastLogIndex; 每次加锁后都要检查状态是否可用, 比如发送心跳前要检查是否是leader
