@@ -54,8 +54,8 @@ const (
 )
 
 type LogType struct {
-	command		interface{}
-	logTerm		int
+	Command		interface{}
+	LogTerm		int
 }
 
 //
@@ -174,7 +174,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		reply.Term = rf.currentTerm
 		lastLogIndex := len(rf.logs)-1
-		lastLogTerm := rf.logs[lastLogIndex].logTerm
+		lastLogTerm := rf.logs[lastLogIndex].LogTerm
 		// election restriction
 		if lastLogTerm < args.LastLogTerm || (lastLogTerm == args.LastLogTerm && lastLogIndex <= args.LastLogIndex) {
 			reply.VoteGranted = true
@@ -227,12 +227,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		prevLogIndex := args.PrevLogIndex
 
 		if prevLogIndex < len(rf.logs) && 
-					(args.PrevLogTerm == rf.logs[prevLogIndex].logTerm || rf.logs[prevLogIndex].logTerm == rf.currentTerm) {
+					(args.PrevLogTerm == rf.logs[prevLogIndex].LogTerm || rf.logs[prevLogIndex].LogTerm == rf.currentTerm) {
 
 			for i := 0; i < len(args.Entries); i++ {
 				if prevLogIndex + 1 + i < len(rf.logs){
-					rf.logs[prevLogIndex+1+i].command = args.Entries[i]
-					rf.logs[prevLogIndex+1+i].logTerm = args.Term
+					rf.logs[prevLogIndex+1+i].Command = args.Entries[i]
+					rf.logs[prevLogIndex+1+i].LogTerm = args.Term
 				} else {
 					rf.logs = append(rf.logs, LogType{args.Entries[i], args.Term})
 				}
@@ -242,7 +242,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// 1) 确定logs的右边界
 			logIndexRight := prevLogIndex + len(args.Entries) + 1
 			for ; logIndexRight < len(rf.logs); logIndexRight++ {
-				if rf.logs[logIndexRight].logTerm != args.Term {
+				if rf.logs[logIndexRight].LogTerm != args.Term {
 					break
 				}
 			}
@@ -258,7 +258,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				commitBefore = prevLogIndex
 			}
 			for i := commitBefore + 1; i <= rf.commitIndex; i++ {
-				rf.applyCh <- ApplyMsg{true, rf.logs[i].command, i}
+				rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i}
 				DPrintf("(applyMsg)role: %v, index: %v", rf.me, i)
 			} 
 
@@ -276,7 +276,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// log inconsistency
 		logIndex := len(rf.logs)-1
-		logTerm := rf.logs[logIndex].logTerm
+		logTerm := rf.logs[logIndex].LogTerm
 		DPrintf("(AppendEntries handler inconsistency) %v(prevIndex: %v, prevTerm: %v) -> %v(prevIndex: %v, prevTerm: %v), len(entries): %v", 
 			args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, rf.me, logIndex, logTerm, len(args.Entries))
 		reply.Success = false
@@ -323,8 +323,8 @@ func (rf *Raft) sendAppendEntries(prevLogIndex int){
 					continue
 				}
 				args.PrevLogIndex = prevLogIndex
-				args.PrevLogTerm = rf.logs[args.PrevLogIndex].logTerm
-				args.Entries[0] = rf.logs[args.PrevLogIndex+1].command
+				args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
+				args.Entries[0] = rf.logs[args.PrevLogIndex+1].Command
 				args.LeaderCommit = rf.commitIndex
 				rf.mu.Unlock()
 
@@ -350,7 +350,7 @@ func (rf *Raft) sendAppendEntries(prevLogIndex int){
 
 					if !isCommit && successNum > serverTotal / 2 {
 						for i := rf.commitIndex + 1; i <= prevLogIndex + 1; i++ {
-							rf.applyCh <- ApplyMsg{true, rf.logs[i].command, i}
+							rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i}
 							DPrintf("(applyMsg leader)role: %v, index: %v", 
 									rf.me, i)
 						}
@@ -489,7 +489,7 @@ func (rf *Raft) voteForLeader() {
 	args.Term = rf.currentTerm
 	args.CandidateId = rf.me
 	args.LastLogIndex = len(rf.logs)-1
-	args.LastLogTerm = rf.logs[rf.commitIndex].logTerm
+	args.LastLogTerm = rf.logs[rf.commitIndex].LogTerm
 	rf.mu.Unlock()
 	DPrintf("(%v voteForLeader), state: %v, term: %v", rf.me, rf.state, rf.currentTerm)
 
@@ -559,10 +559,10 @@ func (rf *Raft) sendHeartbeatToServer(i int, args *AppendEntriesArgs) {
 
 		args.PrevLogIndex = rf.nextIndex[i] - 1
 
-		args.PrevLogTerm = rf.logs[args.PrevLogIndex].logTerm 
+		args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm 
 		args.Entries = make([]interface{}, 0)
 		if args.PrevLogIndex != curPrevLogIndex {
-			args.Entries = append(args.Entries, rf.logs[args.PrevLogIndex+1].command)
+			args.Entries = append(args.Entries, rf.logs[args.PrevLogIndex+1].Command)
 		}
 		rf.mu.Unlock()
 		reply := AppendEntriesReply{}
@@ -688,7 +688,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.applyCh = applyCh
 	rf.logs = make([]LogType, 1)
-	rf.logs[0].logTerm = 0
+	rf.logs[0].LogTerm = 0
 	rf.commitIndex = 0
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
