@@ -5,3 +5,7 @@
 - A: 这里有两个事件: 1) 选举超时, 2) 获得大部分选票, 这两个发生一个都要立即唤醒
     - 由于不熟悉go语言, 第一开始选择让主线程睡眠election time, 子线程发送*RequestVote RPC*, 当发现得到大部分选票时, 立即变为leader, 发送一次心跳, 而之后的心跳还要等主线程超时(只有当主线程苏醒时才能完成定期发送心跳) -> 这样的做法导致: 如果网络不好丢包, 会有其他线程超时参加选举(*Test (2A): initial election ...*测试用例出现*warning: term changed even though there were no failures*)
     - 把选举超时作为一个事件, 开启一个线程去等待超时, 当发生以上两个事件之一时, 唤醒主线程发送心跳
+
+### lab 2B
+- Q(TestFailAgree2B): 对论文的理解不够深入, 只有当绝大多数server获取到当前log, 才能提交; 
+- A: 之前leader实现了绝大多数server获取到当前log, 才提交。而follower没有实现, 忽略了LeaderCommit的作用
