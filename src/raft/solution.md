@@ -9,3 +9,6 @@
 ### lab 2B
 - Q(TestFailAgree2B): 对论文的理解不够深入, 只有当绝大多数server获取到当前log, 才能提交; 
 - A: 之前leader实现了绝大多数server获取到当前log, 才提交。而follower没有实现, 忽略了LeaderCommit的作用
+
+- Q: 总是出现指针越界?
+- A: 不要依赖当前状态去更新nextIndex, 要用RPC的lastLogIndex
