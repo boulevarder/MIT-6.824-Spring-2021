@@ -29,6 +29,7 @@ import "../labgob"
 var (
 	redFormat		string = "\033[35m"
 	whiteFormat		string = "\033[37m"
+	blueFormat		string = "\033[1;34m"
 	warnFormat		string = "\033[1;33m"
 	defaultFormat	string = "\033[0m"
 )
@@ -358,7 +359,14 @@ func (rf *Raft) sendAppendEntries(prevLogIndex int) {
 
 			for {
 				rf.mu.Lock()
-				if rf.state != LeaderState {
+				
+				// prevLogIndex + 1 >= len(rf.logs):
+				// 1) leaderId: 1: len(logs) ==> 200
+				// 2) 1 ==> follower
+				// 3) 1的日志被截断
+				// 4) 1 ==> leader
+				// 5) 数组越界
+				if rf.state != LeaderState || prevLogIndex + 1 >= len(rf.logs){
 					rf.mu.Unlock()
 
 					rf.cond.L.Lock()
@@ -368,9 +376,6 @@ func (rf *Raft) sendAppendEntries(prevLogIndex int) {
 				}
 
 				if prevLogIndex > rf.matchIndex[i] {
-					/*if prevLogIndex > rf.nextIndex[i] - 1 {
-						rf.nextIndex[i] = prevLogIndex + 1
-					}*/
 					rf.mu.Unlock()
 					
 					rf.cond.L.Lock()
@@ -378,11 +383,27 @@ func (rf *Raft) sendAppendEntries(prevLogIndex int) {
 					rf.cond.L.Unlock()
 					continue
 				} else if prevLogIndex < rf.matchIndex[i] {
+
+					successNum++
+					if !isCommit && successNum > serverTotal / 2 {
+						for i := rf.commitIndex + 1; i <= prevLogIndex + 1; i++ {
+							rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i}
+							DPrintf(whiteFormat+"(applyMsg leader)role: %v, index: %v, command: %v"+defaultFormat, 
+								rf.me, i, rf.logs[i].Command)
+						}
+
+						if prevLogIndex + 1 > rf.commitIndex {
+							rf.commitIndex = prevLogIndex + 1
+						}
+						isCommit = true
+					} 
+
 					rf.mu.Unlock()
 
 					rf.cond.L.Lock()
 					rf.cond.Signal()
 					rf.cond.L.Unlock()
+
 					return 
 				}
 
@@ -393,18 +414,30 @@ func (rf *Raft) sendAppendEntries(prevLogIndex int) {
 				rf.mu.Unlock()
 
 				reply := AppendEntriesReply{}
-				DPrintf(redFormat+"(sendAppendEntries) %v -> %v, leaderCommit: %v, prevLogIndex: %v, matchIndex: %v"+defaultFormat,
-					rf.me, i, args.LeaderCommit, args.PrevLogIndex, rf.matchIndex[i])
+				DPrintf(redFormat+"(sendAppendEntries, index: %v) %v -> %v, leaderCommit: %v, prevLogIndex: %v, matchIndex: %v"+defaultFormat,
+					args.PrevLogIndex+1, rf.me, i, args.LeaderCommit, args.PrevLogIndex, rf.matchIndex[i])
 				ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
 
 				rf.mu.Lock()
 				if !ok {
 					rf.mu.Unlock()
-					DPrintf(warnFormat+"(sendAppendEntries) %v -> %v: lose packet"+defaultFormat, rf.me, i)
-					return 
+					DPrintf(warnFormat+"(sendAppendEntries, index: %v) %v -> %v: lose packet"+defaultFormat,
+						args.PrevLogIndex+1, rf.me, i)
+					
+					time.Sleep(time.Millisecond*time.Duration(waitSendAppendEntries))
+					
+					rf.mu.Lock()
+					if rf.state != LeaderState || rf.killed() {
+						rf.mu.Unlock()
+						return 
+					}
+					rf.mu.Unlock()
+					continue 
 				}
 
 				if reply.Success {
+					DPrintf(blueFormat+"(sendAppendEntries, index: %v) %v -> %v: success"+defaultFormat,
+						args.PrevLogIndex+1, rf.me, i)
 					if args.PrevLogIndex + 2 > rf.nextIndex[i] {
 						rf.nextIndex[i] = args.PrevLogIndex + 2
 					}
@@ -656,7 +689,7 @@ func (rf *Raft) sendHeartbeatToServer(i int, term int) {
 			sendIndexRight := rf.nextIndex[i]
 			sendLogTerm := rf.logs[sendIndexRight].LogTerm
 			for {
-				if sendIndexLeft == 0 || rf.logs[sendIndexLeft].LogTerm != sendLogTerm {
+				if sendIndexLeft <= rf.matchIndex[i] || rf.logs[sendIndexLeft].LogTerm != sendLogTerm {
 					break
 				}
 				sendIndexLeft--
