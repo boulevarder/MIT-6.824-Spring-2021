@@ -436,6 +436,16 @@ func (rf *Raft) sendAppendEntries(prevLogIndex int) {
 				}
 
 				if reply.Success {
+					if args.Term != rf.currentTerm {
+						rf.mu.Unlock()
+						DPrintf(blueFormat+"incredible=============================================================================================="+defaultFormat)
+
+						rf.cond.L.Lock()
+						rf.cond.Broadcast()
+						rf.cond.L.Unlock()
+						return 
+					}
+
 					DPrintf(blueFormat+"(sendAppendEntries, index: %v) %v -> %v: success"+defaultFormat,
 						args.PrevLogIndex+1, rf.me, i)
 					if args.PrevLogIndex + 2 > rf.nextIndex[i] {
@@ -725,7 +735,17 @@ func (rf *Raft) sendHeartbeatToServer(i int, term int) {
 
 		rf.mu.Lock()
 		if reply.Success {
-			if args.PrevLogIndex > rf.matchIndex[i] {
+			if args.Term != rf.currentTerm {
+				rf.mu.Unlock()
+
+				rf.cond.L.Lock()
+				rf.cond.Broadcast()
+				rf.cond.L.Unlock()
+				DPrintf(blueFormat+"incredible=============================================================================================="+defaultFormat)
+				return 
+			}
+
+			if args.PrevLogIndex + len(args.Entries) > rf.matchIndex[i] {
 				rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
 			} 
 			if args.PrevLogIndex == curPrevLogIndex {
