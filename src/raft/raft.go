@@ -208,8 +208,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		lastLogTerm := rf.logs[lastLogIndex].LogTerm
 		// election restriction
 		if lastLogTerm < args.LastLogTerm || (lastLogTerm == args.LastLogTerm && lastLogIndex <= args.LastLogIndex) {
+			rf.haveMessagePeriod = true
 			reply.VoteGranted = true
-			DPrintf("(RequestVote handler true) %v(term: %v, log index: %v, log term: %v)->%v(term: %v, log index: %v, log term: %v), ",
+			DPrintf("(RequestVote handler true) %v(term: %v, log index: %v, log term: %v)->%v(term: %v, log index: %v, log term: %v)",
 				args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm,
 				rf.me, rf.currentTerm, lastLogIndex, lastLogTerm)
 			return
@@ -493,10 +494,8 @@ func (rf *Raft) sendAppendEntries(prevLogIndex int) {
 
 				rf.mu.Lock()
 				if !ok {
-					if prevLogIndex + 2 > rf.nextIndex[i] {
-						rf.nextIndex[i] = args.PrevLogIndex + 2
-					}
 					rf.mu.Unlock()
+					DPrintf(warnFormat+"(sendAppendEntries) %v -> %v: lose packet"+defaultFormat, rf.me, i)
 					return 
 				}
 
@@ -589,6 +588,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	prevLogIndex := len(rf.logs)-1
 
 	rf.logs = append(rf.logs, LogType{command, term})
+
+	rf.persist()
+
 	commitIndex := rf.commitIndex
 	rf.mu.Unlock()
 	DPrintf(warnFormat+"(Start)leaderId: %v, start: %v, commitIndex: %v, command: %v"+defaultFormat,
@@ -658,7 +660,7 @@ func (rf *Raft) voteForLeader() {
 	args.Term = rf.currentTerm
 	args.CandidateId = rf.me
 	args.LastLogIndex = len(rf.logs)-1
-	args.LastLogTerm = rf.logs[rf.commitIndex].LogTerm
+	args.LastLogTerm = rf.logs[args.LastLogIndex].LogTerm
 	rf.mu.Unlock()
 	DPrintf("(%v voteForLeader), state: %v, term: %v", rf.me, rf.state, rf.currentTerm)
 
@@ -774,7 +776,10 @@ func (rf *Raft) sendHeartbeatToServer_2b(i int, args *AppendEntriesArgs) {
 
 func (rf *Raft) sendHeartbeatToServer(i int, term int) {
 	rf.mu.Lock()
-	curPrevLogIndex := rf.nextIndex[i]-1
+	curPrevLogIndex := rf.commitIndex
+	if rf.nextIndex[i] - 1 > curPrevLogIndex {
+		curPrevLogIndex = rf.nextIndex[i] - 1
+	}
 	rf.mu.Unlock()
 
 	args := AppendEntriesArgs{}
@@ -790,10 +795,16 @@ func (rf *Raft) sendHeartbeatToServer(i int, term int) {
 			rf.mu.Unlock()
 			return 
 		}
-		alreadySendOnce = true
 
 		args.PrevLogIndex = rf.nextIndex[i] - 1
+		DPrintf("(sendHeartbeatToServer) %v -> %v, args.prevLogIndex: %v, curPrevLogIndex: %v, nextIndex[%v]: %v, leaderCommit: %v",
+			rf.me, i, args.PrevLogIndex, curPrevLogIndex, i, rf.nextIndex[i], rf.commitIndex)
 		args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm 
+
+		if args.PrevLogIndex == curPrevLogIndex {
+			alreadySendOnce = true
+		}
+
 
 		args.Entries = make([]interface{}, 0)
 		if args.PrevLogIndex != curPrevLogIndex {
@@ -804,7 +815,7 @@ func (rf *Raft) sendHeartbeatToServer(i int, term int) {
 
 		reply := AppendEntriesReply{}
 
-		DPrintf("(sendHeartbeatToServer) %v -> %v, prevLogIndex: %v", rf.me, i, args.PrevLogIndex)
+		DPrintf("(sendHeartbeatToServer) %v -> %v, prevLogIndex: %v, leaderCommit: %v", rf.me, i, args.PrevLogIndex, rf.commitIndex)
 		ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
 
 		if !ok {
@@ -941,7 +952,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(rf.peers))
 
 	rf.cond.L = new(sync.Mutex)
-
+	DPrintf(warnFormat+"role: %v starts"+defaultFormat, rf.me)
 	go rf.bgRoutine()
 
 	// initialize from state persisted before a crash
