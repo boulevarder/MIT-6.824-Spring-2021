@@ -27,11 +27,11 @@ import "bytes"
 import "../labgob"
 
 var (
-	redFormat		string = "\033[35m"
-	whiteFormat		string = "\033[37m"
-	blueFormat		string = "\033[1;34m"
-	warnFormat		string = "\033[1;33m"
-	defaultFormat	string = "\033[0m"
+	redFormat		string = ""//= "\033[35m"
+	whiteFormat		string = ""//"\033[37m"
+	blueFormat		string = ""//"\033[1;34m"
+	warnFormat		string = ""//"\033[1;33m"
+	defaultFormat	string = ""//"\033[0m"
 )
 
 //
@@ -411,18 +411,18 @@ func (rf *Raft) sendAppendEntries(prevLogIndex int) {
 				args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
 				args.Entries[0] = rf.logs[args.PrevLogIndex+1].Command
 				args.LeaderCommit = rf.commitIndex
+				DPrintf(redFormat+"(sendAppendEntries, index: %v) %v -> %v, leaderCommit: %v, prevLogIndex: %v, matchIndex: %v"+defaultFormat,
+					args.PrevLogIndex+1, rf.me, i, args.LeaderCommit, args.PrevLogIndex, rf.matchIndex[i])
 				rf.mu.Unlock()
 
 				reply := AppendEntriesReply{}
-				DPrintf(redFormat+"(sendAppendEntries, index: %v) %v -> %v, leaderCommit: %v, prevLogIndex: %v, matchIndex: %v"+defaultFormat,
-					args.PrevLogIndex+1, rf.me, i, args.LeaderCommit, args.PrevLogIndex, rf.matchIndex[i])
 				ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
 
 				rf.mu.Lock()
 				if !ok {
-					rf.mu.Unlock()
 					DPrintf(warnFormat+"(sendAppendEntries, index: %v) %v -> %v: lose packet"+defaultFormat,
 						args.PrevLogIndex+1, rf.me, i)
+					rf.mu.Unlock()
 					
 					time.Sleep(time.Millisecond*time.Duration(waitSendAppendEntries))
 					
@@ -437,8 +437,8 @@ func (rf *Raft) sendAppendEntries(prevLogIndex int) {
 
 				if reply.Success {
 					if args.Term != rf.currentTerm {
-						rf.mu.Unlock()
 						DPrintf(blueFormat+"incredible=============================================================================================="+defaultFormat)
+						rf.mu.Unlock()
 
 						rf.cond.L.Lock()
 						rf.cond.Broadcast()
@@ -540,9 +540,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.persist()
 
 	commitIndex := rf.commitIndex
-	rf.mu.Unlock()
 	DPrintf(warnFormat+"(Start)leaderId: %v, start: %v, commitIndex: %v, command: %v"+defaultFormat,
 		rf.me, prevLogIndex + 1, commitIndex, command)
+	rf.mu.Unlock()
 
 	go rf.sendAppendEntries(prevLogIndex)
 	index = prevLogIndex+1
@@ -590,8 +590,8 @@ func (rf *Raft) waitElectionTimeout() {
 	if rf.haveMessagePeriod == false {
 		rf.state = CandidateState
 	}
-	rf.mu.Unlock()
 	DPrintf("%v electionTimeout, state: %v, term: %v", rf.me, rf.state, rf.currentTerm)
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) voteForLeader() {
@@ -609,8 +609,8 @@ func (rf *Raft) voteForLeader() {
 	args.CandidateId = rf.me
 	args.LastLogIndex = len(rf.logs)-1
 	args.LastLogTerm = rf.logs[args.LastLogIndex].LogTerm
-	rf.mu.Unlock()
 	DPrintf("(%v voteForLeader), state: %v, term: %v", rf.me, rf.state, rf.currentTerm)
+	rf.mu.Unlock()
 
 	getVote := 1
 	serverTotal := len(rf.peers)
@@ -721,12 +721,12 @@ func (rf *Raft) sendHeartbeatToServer(i int, term int) {
 			args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm 
 		}
 		args.LeaderCommit = rf.commitIndex
+		DPrintf("(sendHeartbeatToServer) %v -> %v, prevLogIndex: %v, curPrevLogIndex: %v, leaderCommit: %v, len(entries): %v",
+			rf.me, i, args.PrevLogIndex, curPrevLogIndex, rf.commitIndex, len(args.Entries))
 		rf.mu.Unlock()
 
 		reply := AppendEntriesReply{}
 
-		DPrintf("(sendHeartbeatToServer) %v -> %v, prevLogIndex: %v, curPrevLogIndex: %v, leaderCommit: %v, len(entries): %v",
-			rf.me, i, args.PrevLogIndex, curPrevLogIndex, rf.commitIndex, len(args.Entries))
 		ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
 
 		if !ok {
@@ -736,12 +736,12 @@ func (rf *Raft) sendHeartbeatToServer(i int, term int) {
 		rf.mu.Lock()
 		if reply.Success {
 			if args.Term != rf.currentTerm {
+				DPrintf(blueFormat+"incredible=============================================================================================="+defaultFormat)
 				rf.mu.Unlock()
 
 				rf.cond.L.Lock()
 				rf.cond.Broadcast()
 				rf.cond.L.Unlock()
-				DPrintf(blueFormat+"incredible=============================================================================================="+defaultFormat)
 				return 
 			}
 
@@ -857,6 +857,7 @@ func (rf *Raft) bgRoutine() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
+	rf.mu.Lock()
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
@@ -876,12 +877,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(rf.peers))
 
 	rf.cond.L = new(sync.Mutex)
+
 	DPrintf(warnFormat+"role: %v starts"+defaultFormat, rf.me)
 	go rf.bgRoutine()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-
+	rf.mu.Unlock()
 	return rf
 }
