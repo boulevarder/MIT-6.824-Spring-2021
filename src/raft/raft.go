@@ -466,6 +466,7 @@ func (rf *Raft) voteForLeader() {
 		if rf.state != CandidateState {
 			if !alreadyInform { 
 				chVote <- getVote
+				alreadyInform = true
 			}
 			rf.mu.Unlock()
 			return
