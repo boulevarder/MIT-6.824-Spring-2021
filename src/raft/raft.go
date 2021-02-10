@@ -458,13 +458,15 @@ func (rf *Raft) voteForLeader() {
 	
 	chVote := make(chan int)
 
+	alreadyInform := false
 	go func(){
 		serverTotal := len(rf.peers)
 		getVote := 1
-		isInform := false
 		rf.mu.Lock()
 		if rf.state != CandidateState {
-			chVote <- getVote
+			if !alreadyInform { 
+				chVote <- getVote
+			}
 			rf.mu.Unlock()
 			return
 		}
@@ -492,14 +494,14 @@ func (rf *Raft) voteForLeader() {
 				rf.mu.Lock()
 				if reply.VoteGranted {
 					getVote++
-					if !isInform && rf.currentTerm == args.Term && 
+					if !alreadyInform && rf.currentTerm == args.Term && 
 							getVote > serverTotal / 2 {
 						rf.state = LeaderState
 						for i := 0; i < serverTotal; i++ {
 							rf.nextIndex[i] = len(rf.logs)
 							rf.matchIndex[i] = 0
 						}
-						isInform = true
+						alreadyInform = true
 						chVote <- getVote
 						rf.mu.Unlock()
 						return 
@@ -530,6 +532,7 @@ func (rf *Raft) voteForLeader() {
 
 				rf.persist()
 			}
+			alreadyInform = true
 			rf.mu.Unlock()
 		case voteNum := <- chVote:
 			DPrintf("(voteForLeader succeed) %v get %v votes", rf.me, voteNum)	
