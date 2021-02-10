@@ -500,8 +500,8 @@ func (rf *Raft) voteForLeader() {
 							rf.matchIndex[i] = 0
 						}
 						isInform = true
-						rf.mu.Unlock()
 						chVote <- getVote
+						rf.mu.Unlock()
 						return 
 					}
 					rf.mu.Unlock()
@@ -548,7 +548,6 @@ func (rf *Raft) computeCommitIndex(term int) {
 			return
 		}
 	}
-	DPrintf("commitIndexLeft: %v", commitIndexLeft)
 
 	updateCommitIndex := 0
 	serverTotal := len(rf.peers)
@@ -568,7 +567,6 @@ func (rf *Raft) computeCommitIndex(term int) {
 		if num > serverTotal / 2 {
 			updateCommitIndex = i
 		}
-		DPrintf("index: %v, commitNum: %v", i, num)
 	}
 
 	if updateCommitIndex > rf.commitIndex {
@@ -597,13 +595,11 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 			rf.nextIndex[i] = args.PrevLogIndex + len(args.Entries) + 1
 		}
 
-		DPrintf("(solveAppendEntriesReply) %v -> %v, len(args.Entries): %v, args.PrevLogIndex: %v, matchIndex: %v, %v",
-			rf.me, i, len(args.Entries), args.PrevLogIndex, rf.matchIndex[i], &args)
+		DPrintf("(solveAppendEntriesReply) %v -> %v, len(args.Entries): %v, args.PrevLogIndex: %v, matchIndex: %v",
+			rf.me, i, len(args.Entries), args.PrevLogIndex, rf.matchIndex[i])
 
 		if len(args.Entries) > 0 {
-			DPrintf("args.PrevLogIndex: %v, computeCommitIndex", args.PrevLogIndex)
 			if rf.logs[args.PrevLogIndex + 1].LogTerm == rf.currentTerm {
-				DPrintf("%v", rf.matchIndex[i])
 				go rf.computeCommitIndex(args.Term)
 			}
 		}
@@ -626,6 +622,10 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 	}
 }
 
+type InformComplete struct {
+
+}
+
 func (rf *Raft) loopSendAppendEntries(i int, term int) {
 
 	for !rf.killed() {
@@ -643,43 +643,68 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 		args.LeaderId = rf.me
 		args.PrevLogIndex = rf.nextIndex[i] - 1
 		args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
+
 		args.Entries = make([]LogType, 0)
 		if args.PrevLogIndex + 1 < len(rf.logs) {
-			args.Entries = append(args.Entries, rf.logs[args.PrevLogIndex+1])
+			sendLogIndex := rf.nextIndex[i]
+			if rf.logs[sendLogIndex].LogTerm != term {
+				sendLogIndexLeft := rf.nextIndex[i]
+				for rf.logs[sendLogIndexLeft].LogTerm == rf.logs[sendLogIndex].LogTerm {
+					sendLogIndexLeft--
+
+					if sendLogIndexLeft == rf.matchIndex[i] {
+						break
+					}
+				}
+				sendLogIndexLeft++
+
+				sendLogIndexRight := rf.nextIndex[i]
+				for rf.logs[sendLogIndexRight].LogTerm == rf.logs[sendLogIndex].LogTerm {
+					sendLogIndexRight++
+					if sendLogIndexRight == len(rf.logs) {
+						break
+					}					
+				}
+				sendLogIndexRight--
+				for i := sendLogIndexLeft; i <= sendLogIndexRight; i++ {
+					args.Entries = append(args.Entries, rf.logs[i])
+				}
+				args.PrevLogIndex = sendLogIndexLeft-1
+				args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
+			} else {
+				args.Entries = append(args.Entries, rf.logs[sendLogIndex])
+			}
 		}
+
 		args.LeaderCommit = rf.commitIndex
 		DPrintf("(loopSendAppendEntries) %v -> %v, args.PrevLogIndex: %v, len(entries): %v",
 			rf.me, i, args.PrevLogIndex, len(args.Entries))
 		rf.mu.Unlock()
 
+		okChannel := make(chan InformComplete)
 		reply := AppendEntriesReply{}
 
-		okChannel := make(chan bool)
 
 		go func() {
 			ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
-			okChannel <- ok
+			if ok == false {
+				rf.heartbeatTimers[i].Reset(0)
+				return
+			}
+			okChannel <- InformComplete{}
 		}()
 
 		for {
-			breakOrNot := true
+			breakOrNot := false
 			select {
 			case <- rf.heartbeatTimers[i].C:
 				breakOrNot = true			
-			case ok := <- okChannel:
-				if ok {
-					continueSend := rf.solveAppendEntriesReply(i, &args, &reply)
-					if continueSend {
-						breakOrNot = true
-					} else {
-						breakOrNot = false
-					}
+			case <- okChannel:
+				continueSend := rf.solveAppendEntriesReply(i, &args, &reply)
+				if continueSend {
+					breakOrNot = true
 				} else {
-					if len(args.Entries) > 0 {
-						breakOrNot = true
-					}else {
-						breakOrNot = false
-					}
+					breakOrNot = false
 				}
 			}
 
