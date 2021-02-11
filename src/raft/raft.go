@@ -344,21 +344,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// log inconsistency
 		// arr[start:end]: [start, end)
 		if prevLogIndex < len(rf.logs) {
+			DPrintf(redFormat+"(AppendEntries handler inconsistency) %v(prevIndex: %v, prevTerm: %v) -> %v(prevIndex: %v, prevTerm: %v), len(entries): %v"+defaultFormat,
+				args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, rf.me, args.PrevLogIndex, rf.logs[args.PrevLogIndex].LogTerm, len(args.Entries))
 			rf.logs = rf.logs[0:prevLogIndex]
 			needPersist = true
-		}
-		curPrevLogIndex := args.PrevLogIndex
-		if len(rf.logs)-1 < curPrevLogIndex{
-			curPrevLogIndex = len(rf.logs) - 1
+		} else {
+			curPrevLogIndex := len(rf.logs)-1
+			curPrevLogTerm := rf.logs[curPrevLogIndex].LogTerm
+			DPrintf(redFormat+"(AppendEntries handler inconsistency, len not enough) %v(prevIndex: %v, prevTerm: %v) -> %v(lastIndex: %v, lastTerm: %v), len(entries): %v"+defaultFormat,
+				args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, rf.me, curPrevLogIndex, curPrevLogTerm, len(args.Entries))
 		}
 
 		if needPersist {
 			rf.persist()
 		}
 
-		curPrevLogTerm := rf.logs[curPrevLogIndex].LogTerm
-		DPrintf(redFormat+"(AppendEntries handler inconsistency) %v(prevIndex: %v, prevTerm: %v) -> %v(prevIndex: %v, prevTerm: %v), len(entries): %v"+defaultFormat,
-			args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, rf.me, curPrevLogIndex, curPrevLogTerm, len(args.Entries))
 		reply.Success = false
 	} else {
 		// term outdated
@@ -637,13 +637,20 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 		}
 		return false
 	} else {
-		if rf.currentTerm < reply.Term {
-			rf.currentTerm = reply.Term
-			rf.votedFor = -1
-			rf.state = FollowerState
+		if args.Term < reply.Term {
+			DPrintf("(solveAppendEntriesReply term outdated) %v(argsTerm: %v, currentTerm: %v) -> %v(term: %v)",
+				rf.me, args.Term, rf.currentTerm, i,  reply.Term)
 
-			rf.persist()
+			if rf.currentTerm < reply.Term{
+				rf.currentTerm = reply.Term
+				rf.votedFor = -1
+				rf.state = FollowerState
+
+				rf.persist()
+			}
 		} else {
+			DPrintf("(solveAppendEntriesReply log inconsistency) %v -> %v, args.PrevLogIndex: %v, args.PrevLogTerm: %v",
+				rf.me, i, args.PrevLogIndex, args.PrevLogTerm)
 			rf.nextIndex[i] = args.PrevLogIndex
 		}
 		return true
