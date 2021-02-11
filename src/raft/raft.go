@@ -374,9 +374,7 @@ func (rf *Raft) informAppendEntries() {
 		if i == rf.me {
 			continue
 		}
-		if !rf.heartbeatTimers[i].Stop() {
-			<- rf.heartbeatTimers[i].C
-		}
+
 		rf.heartbeatTimers[i].Reset(0)
 	}
 }
@@ -666,9 +664,6 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 	for !rf.killed() {
 		DPrintf("(loopSendAppendEntries) %v -> %v send", rf.me, i)
 		
-		if !rf.heartbeatTimers[i].Stop() {
-			<- rf.heartbeatTimers[i].C
-		}
 		rf.heartbeatTimers[i].Reset(time.Duration(heartbeatsInterval)*time.Millisecond)
 
 		rf.mu.Lock()
@@ -719,31 +714,27 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 			rf.me, i, args.PrevLogIndex, len(args.Entries))
 		rf.mu.Unlock()
 
-		okChannel := make(chan InformComplete)
+		rpcChannel := make(chan InformComplete)
 		reply := AppendEntriesReply{}
 
 
 		go func() {
 			ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
 			if ok == false {
-				if !rf.heartbeatTimers[i].Stop(){
-					<- rf.heartbeatTimers[i].C
-				}
 				rf.heartbeatTimers[i].Reset(0)
 				return
 			}
 
 			continueSend := rf.solveAppendEntriesReply(i, &args, &reply)
 			if continueSend {
-				okChannel <- InformComplete{}
+				rpcChannel <- InformComplete{}
 			}
 		}()
 
 		select {
 		case <- rf.heartbeatTimers[i].C:
-			rf.heartbeatTimers[i].Reset(0)
 			break
-		case <- okChannel:
+		case <- rpcChannel:
 			break
 		}
 	}
@@ -823,6 +814,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartbeatTimers = make([]*time.Timer, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		rf.heartbeatTimers[i] = time.NewTimer(time.Second)
+		rf.heartbeatTimers[i].Stop()
 	}
 
 	rf.cond.L = new(sync.Mutex)
