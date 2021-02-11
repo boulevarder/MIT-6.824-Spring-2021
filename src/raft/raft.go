@@ -223,6 +223,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm, rf.me, rf.currentTerm, lastLogIndex, lastLogTerm)
 
 			electionTimeoutMs := getElectionTimeout()
+			if !rf.electionTimer.Stop() {
+				<- rf.electionTimer.C
+			}
 			rf.electionTimer.Reset(time.Millisecond * time.Duration(electionTimeoutMs))
 
 			rf.votedFor = args.CandidateId
@@ -271,14 +274,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		needPersist := false
 
 		electionTimeoutMs := getElectionTimeout()
+		if !rf.electionTimer.Stop() {
+			<- rf.electionTimer.C
+		}
 		rf.electionTimer.Reset(time.Millisecond * time.Duration(electionTimeoutMs))
 
 		rf.state = FollowerState
 		if rf.currentTerm != args.Term || rf.votedFor != args.LeaderId {
 			needPersist = true
+			rf.currentTerm = args.Term
+			rf.votedFor = args.LeaderId
 		}
-		rf.currentTerm = args.Term
-		rf.votedFor = args.LeaderId
 
 		reply.Term = rf.currentTerm
 
