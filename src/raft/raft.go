@@ -223,9 +223,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm, rf.me, rf.currentTerm, lastLogIndex, lastLogTerm)
 
 			electionTimeoutMs := getElectionTimeout()
-			if !rf.electionTimer.Stop() {
-				<- rf.electionTimer.C
-			}
 			rf.electionTimer.Reset(time.Millisecond * time.Duration(electionTimeoutMs))
 
 			rf.votedFor = args.CandidateId
@@ -274,9 +271,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		needPersist := false
 
 		electionTimeoutMs := getElectionTimeout()
-		if !rf.electionTimer.Stop() {
-			<- rf.electionTimer.C
-		}
 		rf.electionTimer.Reset(time.Millisecond * time.Duration(electionTimeoutMs))
 
 		rf.state = FollowerState
@@ -444,29 +438,32 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) electionTimeout() int {
+func (rf *Raft) electionTimeout() {
+	rf.mu.Lock()
+	DPrintf("(electionTimeout) follower: %v, term: %v, before set electionTimeout", rf.me, rf.currentTerm)
+	rf.mu.Unlock()
 	electionTimeoutMs := getElectionTimeout()
 	if !rf.electionTimer.Stop() {
 		<-rf.electionTimer.C
 	}
 	rf.electionTimer.Reset(time.Millisecond * time.Duration(electionTimeoutMs))
-	
+	DPrintf("(electionTimeout) follower: %v, after set electionTimeout", rf.me)
+
+	DPrintf("(electionTimeout) follower: %v, before sleep", rf.me)
 	<- rf.electionTimer.C
 	rf.electionTimer.Reset(0)
-
 	rf.mu.Lock()
 	rf.state = CandidateState
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	term := rf.currentTerm
 	rf.persist()
 	rf.mu.Unlock()
-	return term
+	DPrintf("(electionTimeout) follower: %v, after sleep", rf.me)
 }
 
 func (rf *Raft) voteForLeader() {
 	rf.mu.Lock()
-	DPrintf("(voteForLeader) Candidate: %v voteForLead, term: %v", rf.me, rf.currentTerm)
+	DPrintf("(voteForLeader) Candidate: %v voteForLead, term: %v, before set electionTimeout", rf.me, rf.currentTerm)
 	rf.mu.Unlock()
 
 	electionTimeoutMs := getElectionTimeout()
@@ -474,7 +471,8 @@ func (rf *Raft) voteForLeader() {
 		<-rf.electionTimer.C
 	}
 	rf.electionTimer.Reset(time.Millisecond * time.Duration(electionTimeoutMs))
-	
+	DPrintf("(voteForLeader) Candidate: %v, after set electionTimeout", rf.me)
+
 	getVote := 1
 	alreadyInform := false
 	serverTotal := len(rf.peers)
@@ -519,9 +517,6 @@ func (rf *Raft) voteForLeader() {
 							rf.me, getVote, serverTotal, rf.currentTerm)
 						rf.mu.Unlock()
 
-						if !rf.electionTimer.Stop() {
-							<-rf.electionTimer.C
-						}
 						rf.electionTimer.Reset(0)
 
 						return 
@@ -542,24 +537,23 @@ func (rf *Raft) voteForLeader() {
 		}
 	}()
 
-	select {
-		case <- rf.electionTimer.C:
-			rf.electionTimer.Reset(0)
+	DPrintf("(voteForLeader) role: %v, before sleep", rf.me)
+	<- rf.electionTimer.C
+    rf.electionTimer.Reset(0)
+	rf.mu.Lock()
+	if rf.state == CandidateState {
+		rf.currentTerm++
+		rf.votedFor = rf.me
 
-			rf.mu.Lock()
-			if rf.state == CandidateState {
-				rf.currentTerm++
-				rf.votedFor = rf.me
-
-				rf.persist()
-			} 
-			if rf.state != LeaderState {
-				DPrintf("(voteForLeader) %v didn't get enough votes, %v / %v, term: %v, state: %v",
-					rf.me, getVote, serverTotal, rf.currentTerm, rf.state)
-			}
-			alreadyInform = true
-			rf.mu.Unlock()
+		rf.persist()
+	} 
+	if rf.state != LeaderState {
+		DPrintf("(voteForLeader) %v didn't get enough votes, %v / %v, term: %v, state: %v",
+			rf.me, getVote, serverTotal, rf.currentTerm, rf.state)
 	}
+	alreadyInform = true
+	rf.mu.Unlock()
+	DPrintf("(voteForLeader) role: %v, after sleep", rf.me)
 }
 
 
