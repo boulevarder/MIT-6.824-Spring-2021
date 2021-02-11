@@ -410,7 +410,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = false		
 	}
 	rf.mu.Unlock()
-	go rf.informAppendEntries()
+
+	if isLeader{
+		go rf.informAppendEntries()
+	}
 
 	return index, term, isLeader
 }
@@ -474,14 +477,7 @@ func (rf *Raft) voteForLeader() {
 	go func(){
 		rf.mu.Lock()
 		if rf.state != CandidateState {
-			if alreadyInform == false {
-				alreadyInform = true
-				rf.mu.Unlock()
-				if !rf.electionTimer.Stop() {
-					<-rf.electionTimer.C
-				}
-				rf.electionTimer.Reset(0)
-			}
+			rf.mu.Unlock()
 			return
 		}
 
@@ -554,7 +550,8 @@ func (rf *Raft) voteForLeader() {
 				rf.persist()
 			} 
 			if rf.state != LeaderState {
-				DPrintf("(voteForLeader) %v did get enough votes, %v / %v", rf.me, getVote, serverTotal)
+				DPrintf("(voteForLeader) %v didn't get enough votes, %v / %v, term: %v, state: %v",
+					rf.me, getVote, serverTotal, rf.currentTerm, rf.state)
 			}
 			alreadyInform = true
 			rf.mu.Unlock()
@@ -722,30 +719,21 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 				rf.heartbeatTimers[i].Reset(0)
 				return
 			}
-			okChannel <- InformComplete{}
+
+			continueSend := rf.solveAppendEntriesReply(i, &args, &reply)
+			if continueSend {
+				okChannel <- InformComplete{}
+			}
 		}()
 
-		for {
-			breakOrNot := false
-			select {
-			case <- rf.heartbeatTimers[i].C:
-				rf.heartbeatTimers[i].Reset(0)
-				breakOrNot = true			
-			case <- okChannel:
-				continueSend := rf.solveAppendEntriesReply(i, &args, &reply)
-				if continueSend {
-					breakOrNot = true
-				} else {
-					breakOrNot = false
-				}
-			}
-
-			if breakOrNot {
-				break
-			}
+		select {
+		case <- rf.heartbeatTimers[i].C:
+			rf.heartbeatTimers[i].Reset(0)
+			break
+		case <- okChannel:
+			break
 		}
 	}
-
 	rf.cond.L.Lock()
 	rf.cond.Broadcast()
 	rf.cond.L.Unlock()
