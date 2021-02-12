@@ -328,8 +328,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 			
 			reply.Success = true
-			DPrintf(redFormat+"(AppendEntries handler succeed, len(entries): %v), %v(term: %v) -> %v(commit: %v), len(logs): %v, leaderCommit: %v, args.PrevLogIndex: %v"+defaultFormat,
-					len(args.Entries), args.LeaderId, args.Term, rf.me, rf.commitIndex, len(rf.logs), args.LeaderCommit, args.PrevLogIndex)
+			DPrintf(redFormat+"(AppendEntries handler succeed, len(entries): %v), %v(term: %v) -> %v(commit: %v), len(logs): %v, leaderCommit: %v, args.PrevLogIndex: %v, args.PrevLogTerm: %v"+defaultFormat,
+					len(args.Entries), args.LeaderId, args.Term, rf.me, rf.commitIndex, len(rf.logs), args.LeaderCommit, args.PrevLogIndex, args.PrevLogTerm)
 			return 
 		}
 
@@ -634,6 +634,11 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 	if reply.Success {
 		if args.PrevLogIndex + len(args.Entries) > rf.matchIndex[i] {
 			rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
+		
+			if len(args.Entries) > 0 && rf.logs[args.PrevLogIndex + 1].LogTerm == rf.currentTerm && 
+					rf.commitIndex < rf.matchIndex[i] {
+				go rf.computeCommitIndex(args.Term)
+			}
 		}
 		if args.PrevLogIndex + len(args.Entries) + 1 > rf.nextIndex[i] {
 			rf.nextIndex[i] = args.PrevLogIndex + len(args.Entries) + 1
@@ -642,11 +647,6 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 		DPrintf("(solveAppendEntriesReply) %v -> %v, len(args.Entries): %v, args.PrevLogIndex: %v, matchIndex: %v",
 			rf.me, i, len(args.Entries), args.PrevLogIndex, rf.matchIndex[i])
 
-		if len(args.Entries) > 0 {
-			if rf.logs[args.PrevLogIndex + 1].LogTerm == rf.currentTerm {
-				go rf.computeCommitIndex(args.Term)
-			}
-		}
 
 		if len(rf.logs) - 1 > rf.matchIndex[i] {
 			return true
