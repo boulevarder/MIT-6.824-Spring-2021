@@ -100,9 +100,9 @@ type Raft struct {
 	nextIndex		[]int
 	matchIndex		[]int
 
-	electionTimer	*time.Timer
-	heartbeatTimers	[]*time.Timer
-	cond 			sync.Cond 
+	haveMessagePeriod	bool
+	heartbeatTimers		[]*time.Timer
+	cond 				sync.Cond 
 }
 
 // return currentTerm and whether this server
@@ -222,8 +222,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			DPrintf("(RequestVote handler true) %v(term: %v, len(logs): %v, log term: %v) -> %v(term: %v, len(logs): %v, log term: %v)",
 				args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm, rf.me, rf.currentTerm, lastLogIndex, lastLogTerm)
 
-			electionTimeoutMs := getElectionTimeout()
-			rf.electionTimer.Reset(time.Millisecond * time.Duration(electionTimeoutMs))
+			rf.haveMessagePeriod = true
 
 			rf.votedFor = args.CandidateId
 
@@ -270,8 +269,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		needPersist := false
 
-		electionTimeoutMs := getElectionTimeout()
-		rf.electionTimer.Reset(time.Millisecond * time.Duration(electionTimeoutMs))
+		rf.haveMessagePeriod = true
 
 		rf.state = FollowerState
 		if rf.currentTerm != args.Term || rf.votedFor != args.LeaderId {
@@ -440,42 +438,57 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) electionTimeout() {
 	rf.mu.Lock()
-	DPrintf("(electionTimeout) follower: %v, term: %v, before set electionTimeout", rf.me, rf.currentTerm)
+	DPrintf("(electionTimeout begin) follower: %v, term: %v", rf.me, rf.currentTerm)
+	rf.haveMessagePeriod = false
 	rf.mu.Unlock()
 	electionTimeoutMs := getElectionTimeout()
-	if !rf.electionTimer.Stop() {
-		<-rf.electionTimer.C
-	}
-	rf.electionTimer.Reset(time.Millisecond * time.Duration(electionTimeoutMs))
-	DPrintf("(electionTimeout) follower: %v, after set electionTimeout", rf.me)
+	
+	time.Sleep(time.Millisecond * time.Duration(electionTimeoutMs))
 
-	DPrintf("(electionTimeout) follower: %v, before sleep", rf.me)
-	<- rf.electionTimer.C
-	rf.electionTimer.Reset(0)
 	rf.mu.Lock()
-	rf.state = CandidateState
-	rf.currentTerm++
-	rf.votedFor = rf.me
-	rf.persist()
+	if rf.haveMessagePeriod == false {
+		rf.state = CandidateState
+		rf.currentTerm++
+		rf.votedFor = rf.me
+		rf.persist()
+		DPrintf("(electionTimeout end) candidate: %v, term: %v", rf.me, rf.currentTerm)
+	} else {
+		DPrintf("(electionTimeout end) follower: %v, term: %v", rf.me, rf.currentTerm)	
+	}
 	rf.mu.Unlock()
-	DPrintf("(electionTimeout) follower: %v, after sleep", rf.me)
 }
 
 func (rf *Raft) voteForLeader() {
 	rf.mu.Lock()
-	DPrintf("(voteForLeader) Candidate: %v voteForLead, term: %v, before set electionTimeout", rf.me, rf.currentTerm)
+	DPrintf("(voteForLeader begin) Candidate: %v voteForLead, term: %v", rf.me, rf.currentTerm)
+	rf.haveMessagePeriod = false
 	rf.mu.Unlock()
 
-	electionTimeoutMs := getElectionTimeout()
-	if !rf.electionTimer.Stop() {
-		<-rf.electionTimer.C
-	}
-	rf.electionTimer.Reset(time.Millisecond * time.Duration(electionTimeoutMs))
-	DPrintf("(voteForLeader) Candidate: %v, after set electionTimeout", rf.me)
-
+	cond := sync.NewCond(new(sync.Mutex))
 	getVote := 1
 	alreadyInform := false
 	serverTotal := len(rf.peers)
+
+	go func() {
+		electionTimeoutMs := getElectionTimeout()
+		
+		for i := 0; i < 4; i++ {
+			time.Sleep(time.Millisecond * time.Duration(electionTimeoutMs / 4))
+			
+			rf.mu.Lock()
+			if rf.state == LeaderState {
+				alreadyInform = true
+				rf.mu.Unlock()
+
+				cond.L.Lock()
+				cond.Broadcast()
+				cond.L.Unlock()
+				return
+			}
+			rf.mu.Unlock()
+		}
+	}()
+
 	go func(){
 		rf.mu.Lock()
 		if rf.state != CandidateState {
@@ -513,12 +526,11 @@ func (rf *Raft) voteForLeader() {
 							rf.matchIndex[i] = 0
 						}
 						alreadyInform = true
-						DPrintf("(voteForLeader) %v gets %v votes(total: %v), becomes leader, term: %v",
-							rf.me, getVote, serverTotal, rf.currentTerm)
 						rf.mu.Unlock()
 
-						rf.electionTimer.Reset(0)
-
+						cond.L.Lock()
+						cond.Broadcast()
+						cond.L.Unlock()
 						return 
 					}
 					rf.mu.Unlock()
@@ -537,23 +549,31 @@ func (rf *Raft) voteForLeader() {
 		}
 	}()
 
-	DPrintf("(voteForLeader) role: %v, before sleep", rf.me)
-	<- rf.electionTimer.C
-    rf.electionTimer.Reset(0)
-	rf.mu.Lock()
-	if rf.state == CandidateState {
-		rf.currentTerm++
-		rf.votedFor = rf.me
 
-		rf.persist()
-	} 
+
+	cond.L.Lock()
+	cond.Wait()
+
+	rf.mu.Lock()
 	if rf.state != LeaderState {
 		DPrintf("(voteForLeader) %v didn't get enough votes, %v / %v, term: %v, state: %v",
 			rf.me, getVote, serverTotal, rf.currentTerm, rf.state)
+
+		if rf.haveMessagePeriod {
+			rf.state = FollowerState
+		} else {
+			rf.currentTerm++
+			rf.votedFor = rf.me
+			rf.state = CandidateState
+
+			rf.persist()
+		}
+	} else {
+		DPrintf("(voteForLeader) %v gets %v votes(total: %v), becomes leader, term: %v",
+			rf.me, getVote, serverTotal, rf.currentTerm)
 	}
 	alreadyInform = true
 	rf.mu.Unlock()
-	DPrintf("(voteForLeader) role: %v, after sleep", rf.me)
 }
 
 
@@ -644,6 +664,9 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 			DPrintf("(solveAppendEntriesReply log inconsistency) %v -> %v, args.PrevLogIndex: %v, args.PrevLogTerm: %v",
 				rf.me, i, args.PrevLogIndex, args.PrevLogTerm)
 			rf.nextIndex[i] = args.PrevLogIndex
+			if rf.nextIndex[i] < rf.matchIndex[i] + 1 {
+				rf.nextIndex[i] = rf.matchIndex[i] + 1
+			} 
 		}
 		return true
 	}
@@ -802,8 +825,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
-
-	rf.electionTimer = time.NewTimer(time.Second)
 
 	rf.heartbeatTimers = make([]*time.Timer, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
