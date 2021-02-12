@@ -476,7 +476,7 @@ func (rf *Raft) voteForLeader() {
 			time.Sleep(time.Millisecond * time.Duration(electionTimeoutMs / 4))
 			
 			rf.mu.Lock()
-			if rf.state == LeaderState {
+			if rf.state != CandidateState {
 				alreadyInform = true
 				rf.mu.Unlock()
 
@@ -487,6 +487,9 @@ func (rf *Raft) voteForLeader() {
 			}
 			rf.mu.Unlock()
 		}
+		cond.L.Lock()
+		cond.Broadcast()
+		cond.L.Unlock()
 	}()
 
 	go func(){
@@ -553,6 +556,7 @@ func (rf *Raft) voteForLeader() {
 
 	cond.L.Lock()
 	cond.Wait()
+	cond.L.Unlock()
 
 	rf.mu.Lock()
 	if rf.state != LeaderState {
