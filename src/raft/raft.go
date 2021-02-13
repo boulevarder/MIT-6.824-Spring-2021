@@ -320,7 +320,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				DPrintf(whiteFormat+"(applyMsg) role: %v, index: %v, command: %v"+defaultFormat,
 					rf.me, i, rf.logs[i].Command)
 			}
-			rf.commitIndex = commitIndex
+			
+			if rf.commitIndex < commitIndex {
+				rf.commitIndex = commitIndex
+			}
 
 			if needPersist {
 				rf.persist()
