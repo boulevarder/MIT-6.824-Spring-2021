@@ -700,33 +700,30 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 		args.Entries = make([]LogType, 0)
 		if args.PrevLogIndex + 1 < len(rf.logs) {
 			sendLogIndex := rf.nextIndex[i]
-			if rf.logs[sendLogIndex].LogTerm != term {
-				sendLogIndexLeft := rf.nextIndex[i]
-				for rf.logs[sendLogIndexLeft].LogTerm == rf.logs[sendLogIndex].LogTerm {
-					sendLogIndexLeft--
+			
+			sendLogIndexLeft := rf.nextIndex[i]
+			for rf.logs[sendLogIndexLeft].LogTerm == rf.logs[sendLogIndex].LogTerm {
+				sendLogIndexLeft--
 
-					if sendLogIndexLeft == rf.matchIndex[i] {
-						break
-					}
+				if sendLogIndexLeft == rf.matchIndex[i] {
+					break
 				}
-				sendLogIndexLeft++
-
-				sendLogIndexRight := rf.nextIndex[i]
-				for rf.logs[sendLogIndexRight].LogTerm == rf.logs[sendLogIndex].LogTerm {
-					sendLogIndexRight++
-					if sendLogIndexRight == len(rf.logs) {
-						break
-					}					
-				}
-				sendLogIndexRight--
-				for i := sendLogIndexLeft; i <= sendLogIndexRight; i++ {
-					args.Entries = append(args.Entries, rf.logs[i])
-				}
-				args.PrevLogIndex = sendLogIndexLeft-1
-				args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
-			} else {
-				args.Entries = append(args.Entries, rf.logs[sendLogIndex])
 			}
+			sendLogIndexLeft++
+
+			sendLogIndexRight := rf.nextIndex[i]
+			for rf.logs[sendLogIndexRight].LogTerm == rf.logs[sendLogIndex].LogTerm {
+				sendLogIndexRight++
+				if sendLogIndexRight == len(rf.logs) {
+					break
+				}					
+			}
+			sendLogIndexRight--
+			for i := sendLogIndexLeft; i <= sendLogIndexRight; i++ {
+				args.Entries = append(args.Entries, rf.logs[i])
+			}
+			args.PrevLogIndex = sendLogIndexLeft-1
+			args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
 		}
 
 		args.LeaderCommit = rf.commitIndex
