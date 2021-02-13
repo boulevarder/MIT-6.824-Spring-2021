@@ -368,7 +368,7 @@ func (rf *Raft) informAppendEntries() {
 
 		go func(i int) {
 			rf.newLogConds[i].L.Lock()
-			rf.newLogConds[i].Signal()
+			rf.newLogConds[i].Broadcast()
 			rf.newLogConds[i].L.Unlock()
 		}(i)
 	}
@@ -635,6 +635,12 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 	}
 
 	if reply.Success {
+		if len(args.Entries) == 0 && len(rf.logs) - 2 >= rf.matchIndex[i] {
+			rf.newLogConds[i].L.Lock()
+			rf.newLogConds[i].Broadcast()
+			rf.newLogConds[i].L.Unlock()
+		}
+
 		if args.PrevLogIndex + len(args.Entries) > rf.matchIndex[i] {
 			rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
 		
@@ -714,7 +720,7 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 				}					
 			}
 			sendLogIndexRight--
-			
+
 			args.Entries = rf.logs[sendLogIndexLeft: sendLogIndexRight+1]
 			args.PrevLogIndex = sendLogIndexLeft-1
 			args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
