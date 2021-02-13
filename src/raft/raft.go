@@ -101,8 +101,7 @@ type Raft struct {
 	matchIndex		[]int
 
 	haveMessagePeriod	bool
-	heartbeatTimers		[]*time.Timer
-	cond 				sync.Cond 
+	newLogConds			[]*sync.Cond
 }
 
 // return currentTerm and whether this server
@@ -367,7 +366,11 @@ func (rf *Raft) informAppendEntries() {
 			continue
 		}
 
-		rf.heartbeatTimers[i].Reset(0)
+		go func(i int) {
+			rf.newLogConds[i].L.Lock()
+			rf.newLogConds[i].Signal()
+			rf.newLogConds[i].L.Unlock()
+		}(i)
 	}
 }
 
@@ -683,10 +686,6 @@ type InformComplete struct {
 func (rf *Raft) loopSendAppendEntries(i int, term int) {
 
 	for !rf.killed() {
-		DPrintf("(loopSendAppendEntries) %v -> %v send", rf.me, i)
-		
-		rf.heartbeatTimers[i].Reset(time.Duration(heartbeatsInterval)*time.Millisecond)
-
 		rf.mu.Lock()
 		if rf.currentTerm != term || rf.state != LeaderState {
 			rf.mu.Unlock()
@@ -735,33 +734,42 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 			rf.me, i, args.PrevLogIndex, len(args.Entries))
 		rf.mu.Unlock()
 
-		rpcChannel := make(chan InformComplete)
-		reply := AppendEntriesReply{}
-
-
+		rpcTimer := time.NewTimer(time.Millisecond * time.Duration(heartbeatsInterval))
+		informChannel := make(chan InformComplete)
 		go func() {
+			reply := AppendEntriesReply{}
 			ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
 			if ok == false {
-				rf.heartbeatTimers[i].Reset(0)
+				rf.newLogConds[i].L.Lock()
+				rf.newLogConds[i].Signal()
+				rf.newLogConds[i].L.Unlock()
 				return
 			}
 
 			continueSend := rf.solveAppendEntriesReply(i, &args, &reply)
 			if continueSend {
-				rpcChannel <- InformComplete{}
+				informChannel <- InformComplete{}
 			}
 		}()
-
+		
 		select {
-		case <- rf.heartbeatTimers[i].C:
+		case <- informChannel:
 			break
-		case <- rpcChannel:
+		case <- rpcTimer.C:
 			break
 		}
+
+		rf.mu.Lock()
+		if len(rf.logs) - 1 >= rf.nextIndex[i] {
+			rf.mu.Unlock()
+			continue
+		}
+		rf.mu.Unlock()
+
+		rf.newLogConds[i].L.Lock()
+		rf.newLogConds[i].Wait()
+		rf.newLogConds[i].L.Unlock()
 	}
-	rf.cond.L.Lock()
-	rf.cond.Broadcast()
-	rf.cond.L.Unlock()
 }
 
 func (rf *Raft) sendAppendEntriesToAllPeers() {
@@ -776,9 +784,49 @@ func (rf *Raft) sendAppendEntriesToAllPeers() {
 		go rf.loopSendAppendEntries(i, term)
 	}
 
-	rf.cond.L.Lock()
-	rf.cond.Wait()
-	rf.cond.L.Unlock()
+	for !rf.killed() {
+		rf.mu.Lock()
+		if rf.currentTerm != term {
+			rf.mu.Unlock()
+			break
+		}
+		rf.mu.Unlock()
+		DPrintf("(sendHeartbeats) leader: %v", rf.me)
+		go func() {
+			for i := 0; i < len(rf.peers); i++ {
+				if i == rf.me {
+					continue
+				}
+
+				go func(i int) {
+					args := AppendEntriesArgs{}
+					args.LeaderId = rf.me
+					args.Entries = make([]LogType, 0)
+					rf.mu.Lock()
+					if rf.currentTerm != term {
+						rf.mu.Unlock()
+						return
+					}
+					args.Term = term
+					args.PrevLogIndex = rf.nextIndex[i] - 1
+					args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
+					args.LeaderCommit = rf.commitIndex
+					rf.mu.Unlock()
+
+					reply := AppendEntriesReply{}
+					ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
+					if !ok {
+						return
+					}
+
+					rf.solveAppendEntriesReply(i, &args, &reply)
+				}(i)
+
+			}
+		}()
+
+		time.Sleep(time.Millisecond * time.Duration(heartbeatsInterval))
+	}
 }
 
 func (rf *Raft) bgRoutine() {	
@@ -830,13 +878,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 
-	rf.heartbeatTimers = make([]*time.Timer, len(rf.peers))
+	rf.newLogConds = make([]*sync.Cond, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
-		rf.heartbeatTimers[i] = time.NewTimer(time.Second)
-		rf.heartbeatTimers[i].Stop()
+		rf.newLogConds[i] = sync.NewCond(new(sync.Mutex))
 	}
 
-	rf.cond.L = new(sync.Mutex)
 	DPrintf(warnFormat+"%v starts"+defaultFormat, rf.me)
 
 	// initialize from state persisted before a crash
