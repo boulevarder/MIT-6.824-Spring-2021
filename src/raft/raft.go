@@ -665,7 +665,7 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 			DPrintf("(solveAppendEntriesReply term outdated) %v(argsTerm: %v, currentTerm: %v) -> %v(term: %v)",
 				rf.me, args.Term, rf.currentTerm, i,  reply.Term)
 
-			if rf.currentTerm < reply.Term{
+			if rf.currentTerm < reply.Term {
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
 				rf.state = FollowerState
@@ -714,20 +714,11 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 				}
 			}
 			sendLogIndexLeft++
-
-			sendLogIndexRight := rf.nextIndex[i]
-			for rf.logs[sendLogIndexRight].LogTerm == rf.logs[sendLogIndex].LogTerm {
-				sendLogIndexRight++
-				if sendLogIndexRight == len(rf.logs) {
-					break
-				}					
-			}
-			sendLogIndexRight--
 			
-			for i := sendLogIndexLeft; i <= sendLogIndexRight; i++ {
-				// slice 竟然是浅拷贝, data race
+			for i := sendLogIndexLeft; i < len(rf.logs); i++ {
 				args.Entries = append(args.Entries, rf.logs[i])
 			}
+
 			args.PrevLogIndex = sendLogIndexLeft-1
 			args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
 		}
