@@ -720,8 +720,11 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 				}					
 			}
 			sendLogIndexRight--
-
-			args.Entries = rf.logs[sendLogIndexLeft: sendLogIndexRight+1]
+			
+			for i := sendLogIndexLeft; i <= sendLogIndexRight; i++ {
+				// slice 竟然是浅拷贝, data race
+				args.Entries = append(args.Entries, rf.logs[i])
+			}
 			args.PrevLogIndex = sendLogIndexLeft-1
 			args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
 		}
