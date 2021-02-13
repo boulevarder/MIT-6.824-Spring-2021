@@ -629,12 +629,12 @@ func (rf *Raft) computeCommitIndex(term int) {
 	}
 }
 
-func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	
 	if rf.currentTerm != args.Term {
-		return 
+		return false
 	}
 
 	if reply.Success {
@@ -659,7 +659,7 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 		DPrintf("(solveAppendEntriesReply) %v -> %v, len(args.Entries): %v, args.PrevLogIndex: %v, matchIndex: %v",
 			rf.me, i, len(args.Entries), args.PrevLogIndex, rf.matchIndex[i])
 
-		return
+		return true
 	} else {
 		if args.Term < reply.Term {
 			DPrintf("(solveAppendEntriesReply term outdated) %v(argsTerm: %v, currentTerm: %v) -> %v(term: %v)",
@@ -680,16 +680,13 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 			DPrintf("(solveAppendEntriesReply log inconsistency) %v -> %v, args.PrevLogIndex: %v, args.PrevLogTerm: %v, nextIndex: %v",
 				rf.me, i, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[i])
 		}
-		return
+		return false
 	}
 }
 
-type InformComplete struct {
-
-}
 
 func (rf *Raft) loopSendAppendEntries(i int, term int) {
-
+	beforeSendSuccess := false
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.currentTerm != term || rf.state != LeaderState {
@@ -715,10 +712,13 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 			}
 			sendLogIndexLeft++
 			
-			for i := sendLogIndexLeft; i < len(rf.logs); i++ {
-				args.Entries = append(args.Entries, rf.logs[i])
+			if beforeSendSuccess {			
+				for i := sendLogIndexLeft; i < len(rf.logs); i++ {
+					args.Entries = append(args.Entries, rf.logs[i])
+				}
+			} else {
+				args.Entries = append(args.Entries, rf.logs[sendLogIndexLeft])
 			}
-
 			args.PrevLogIndex = sendLogIndexLeft-1
 			args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
 		}
@@ -729,7 +729,7 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 		rf.mu.Unlock()
 
 		rpcTimer := time.NewTimer(time.Millisecond * time.Duration(heartbeatsInterval))
-		informChannel := make(chan InformComplete)
+		informChannel := make(chan bool)
 		go func() {
 			reply := AppendEntriesReply{}
 			ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
@@ -737,13 +737,14 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 				return
 			}
 
-			rf.solveAppendEntriesReply(i, &args, &reply)
-			informChannel <- InformComplete{}
+			success := rf.solveAppendEntriesReply(i, &args, &reply)
+			informChannel <- success
 		}()
 		
 		select {
-		case <- informChannel:
+		case beforeSendSuccess =<- informChannel:
 		case <- rpcTimer.C:
+			beforeSendSuccess = false
 		}
 
 		rf.mu.Lock()
