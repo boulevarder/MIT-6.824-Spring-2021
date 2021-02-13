@@ -626,12 +626,12 @@ func (rf *Raft) computeCommitIndex(term int) {
 	}
 }
 
-func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	
 	if rf.currentTerm != args.Term {
-		return true
+		return 
 	}
 
 	if reply.Success {
@@ -650,11 +650,7 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 		DPrintf("(solveAppendEntriesReply) %v -> %v, len(args.Entries): %v, args.PrevLogIndex: %v, matchIndex: %v",
 			rf.me, i, len(args.Entries), args.PrevLogIndex, rf.matchIndex[i])
 
-
-		if len(rf.logs) - 1 > rf.matchIndex[i] {
-			return true
-		}
-		return false
+		return
 	} else {
 		if args.Term < reply.Term {
 			DPrintf("(solveAppendEntriesReply term outdated) %v(argsTerm: %v, currentTerm: %v) -> %v(term: %v)",
@@ -668,14 +664,14 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 				rf.persist()
 			}
 		} else {
-			DPrintf("(solveAppendEntriesReply log inconsistency) %v -> %v, args.PrevLogIndex: %v, args.PrevLogTerm: %v",
-				rf.me, i, args.PrevLogIndex, args.PrevLogTerm)
 			rf.nextIndex[i] = args.PrevLogIndex
 			if rf.nextIndex[i] < rf.matchIndex[i] + 1 {
 				rf.nextIndex[i] = rf.matchIndex[i] + 1
 			} 
+			DPrintf("(solveAppendEntriesReply log inconsistency) %v -> %v, args.PrevLogIndex: %v, args.PrevLogTerm: %v, nextIndex: %v",
+				rf.me, i, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[i])
 		}
-		return true
+		return
 	}
 }
 
@@ -697,7 +693,6 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 		args.PrevLogIndex = rf.nextIndex[i] - 1
 		args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
 
-		args.Entries = make([]LogType, 0)
 		if args.PrevLogIndex + 1 < len(rf.logs) {
 			sendLogIndex := rf.nextIndex[i]
 			
@@ -719,9 +714,8 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 				}					
 			}
 			sendLogIndexRight--
-			for i := sendLogIndexLeft; i <= sendLogIndexRight; i++ {
-				args.Entries = append(args.Entries, rf.logs[i])
-			}
+			
+			args.Entries = rf.logs[sendLogIndexLeft: sendLogIndexRight+1]
 			args.PrevLogIndex = sendLogIndexLeft-1
 			args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
 		}
@@ -737,27 +731,20 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 			reply := AppendEntriesReply{}
 			ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
 			if ok == false {
-				rf.newLogConds[i].L.Lock()
-				rf.newLogConds[i].Signal()
-				rf.newLogConds[i].L.Unlock()
 				return
 			}
 
-			continueSend := rf.solveAppendEntriesReply(i, &args, &reply)
-			if continueSend {
-				informChannel <- InformComplete{}
-			}
+			rf.solveAppendEntriesReply(i, &args, &reply)
+			informChannel <- InformComplete{}
 		}()
 		
 		select {
 		case <- informChannel:
-			break
 		case <- rpcTimer.C:
-			break
 		}
 
 		rf.mu.Lock()
-		if len(rf.logs) - 1 >= rf.nextIndex[i] {
+		if len(rf.logs) - 2 >= rf.matchIndex[i] || rf.currentTerm != term {
 			rf.mu.Unlock()
 			continue
 		}
