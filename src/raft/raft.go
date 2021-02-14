@@ -677,8 +677,8 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 			if rf.nextIndex[i] < rf.matchIndex[i] + 1 {
 				rf.nextIndex[i] = rf.matchIndex[i] + 1
 			} 
-			DPrintf("(solveAppendEntriesReply log inconsistency) %v -> %v, args.PrevLogIndex: %v, args.PrevLogTerm: %v, nextIndex: %v",
-				rf.me, i, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[i])
+			DPrintf("(solveAppendEntriesReply log inconsistency) %v -> %v, args.PrevLogIndex: %v, args.PrevLogTerm: %v, nextIndex: %v, matchIndex: %v",
+				rf.me, i, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[i], rf.matchIndex[i])
 		}
 		return false
 	}
@@ -711,7 +711,7 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 				}
 			}
 			sendLogIndexLeft++
-			
+
 			if beforeSendSuccess {			
 				for i := sendLogIndexLeft; i < len(rf.logs); i++ {
 					args.Entries = append(args.Entries, rf.logs[i])
@@ -719,8 +719,13 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 			} else {
 				args.Entries = append(args.Entries, rf.logs[sendLogIndexLeft])
 			}
-			args.PrevLogIndex = sendLogIndexLeft-1
+			args.PrevLogIndex = sendLogIndexLeft - 1
 			args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
+
+			rf.nextIndex[i] = args.PrevLogIndex
+			if rf.nextIndex[i] <= rf.matchIndex[i] {
+				rf.nextIndex[i] = rf.matchIndex[i] + 1
+			}
 		}
 
 		args.LeaderCommit = rf.commitIndex
