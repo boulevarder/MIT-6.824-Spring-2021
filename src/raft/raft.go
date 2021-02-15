@@ -96,12 +96,14 @@ type Raft struct {
 	logs			[]LogType
 
 	commitIndex		int
+	lastApplied		int
 
 	nextIndex		[]int
 	matchIndex		[]int
 
 	haveMessagePeriod	bool
 	newLogConds			[]*sync.Cond
+	applyCond			sync.Cond
 }
 
 // return currentTerm and whether this server
@@ -313,16 +315,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if args.LeaderCommit < commitIndex {
 				commitIndex = args.LeaderCommit
 			}
-
-
-			for i := rf.commitIndex+1; i <= commitIndex; i++ {
-				rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i}
-				DPrintf(whiteFormat+"(applyMsg) role: %v, index: %v, command: %v"+defaultFormat,
-					rf.me, i, rf.logs[i].Command)
-			}
 			
 			if rf.commitIndex < commitIndex {
 				rf.commitIndex = commitIndex
+				
+				rf.applyCond.L.Lock()
+				rf.applyCond.Broadcast()
+				rf.applyCond.L.Unlock()
 			}
 
 			if needPersist {
@@ -620,12 +619,11 @@ func (rf *Raft) computeCommitIndex(term int) {
 	}
 
 	if updateCommitIndex > rf.commitIndex {
-		for i := rf.commitIndex + 1; i <= updateCommitIndex; i++ {
-			rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i}
-			DPrintf(whiteFormat+"(applyMsg leader) role: %v, index: %v, command: %v"+defaultFormat,
-				rf.me, i, rf.logs[i].Command)
-		} 
 		rf.commitIndex = updateCommitIndex
+		
+		rf.applyCond.L.Lock()
+		rf.applyCond.Broadcast()
+		rf.applyCond.L.Unlock()
 	}
 }
 
@@ -839,6 +837,29 @@ func (rf *Raft) bgRoutine() {
 }
 
 
+func (rf *Raft) applyMsgRoutine() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+			rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i}
+
+			if rf.state == LeaderState {
+				DPrintf(whiteFormat+"(applyMsg leader) role: %v, index: %v, command: %v"+defaultFormat,
+					rf.me, i, rf.logs[i].Command)
+			} else {
+				DPrintf(whiteFormat+"(applyMsg) role: %v, index: %v, command: %v"+defaultFormat,
+					rf.me, i, rf.logs[i].Command)
+			}
+		} 
+		rf.lastApplied = rf.commitIndex
+		rf.mu.Unlock()
+
+		rf.applyCond.L.Lock()
+		rf.applyCond.Wait()
+		rf.applyCond.L.Unlock()
+	}
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -867,6 +888,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logs[0].LogTerm = 0
 
 	rf.commitIndex = 0
+	rf.lastApplied = 0
 	
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
@@ -876,12 +898,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.newLogConds[i] = sync.NewCond(new(sync.Mutex))
 	}
 
+	rf.applyCond.L = new(sync.Mutex)
+
 	DPrintf(warnFormat+"%v starts"+defaultFormat, rf.me)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	
 	go rf.bgRoutine()
+	
+	go rf.applyMsgRoutine()
 
 	return rf
 }
