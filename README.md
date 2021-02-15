@@ -1,4 +1,4 @@
-# MIT-6.824-Spring 2021
+# MIT-6.824-Spring 2020
 https://pdos.csail.mit.edu/6.824/
 
 ## Status
