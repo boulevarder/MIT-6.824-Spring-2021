@@ -38,28 +38,34 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
-
+	randNum := nrand()
 	server := 0
+
 	for {
-		args := GetArgs{key}
+		args := GetArgs {
+			Key		: key,
+			RandNum	: randNum,
+		}
 		reply := GetReply{}
 		ok := ck.servers[server].Call("KVServer.Get", &args, &reply)
+
 		if ok {
-			switch(reply.Err) {
-			case "OK":
+			switch (reply.Err) {
+			case OK:
 				return reply.Value
-			case "ErrNoKey":
+			case ErrNoKey:
 				return ""
-			case "ErrWrongLeader":
+			case ErrWrongLeader:
 				server++
 			}
+		} else {
+			server++
 		}
-		
+
 		if server == len(ck.servers) {
 			server = 0
 		}
 	}
-	return ""
 }
 
 //
@@ -74,25 +80,30 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-
+	randNum := nrand()
 	server := 0
+
 	for {
 		args := PutAppendArgs {
-			Key   : key,
-			Value : value,
-			Op	  : op,
+			Key		: key,
+			Value	: value,
+			Op		: op,
+			RandNum	: randNum,
 		}
 		reply := PutAppendReply{}
 		ok := ck.servers[server].Call("KVServer.PutAppend", &args, &reply)
+
 		if ok {
 			switch(reply.Err) {
-			case "OK":
-				return 
-			case "ErrWrongLeader":
+			case OK:
+				return
+			case ErrWrongLeader:
 				server++
 			}
+		} else {
+			server++
 		}
-		
+
 		if server == len(ck.servers) {
 			server = 0
 		}
