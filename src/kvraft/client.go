@@ -80,7 +80,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		args := PutAppendArgs {
 			Key   : key,
 			Value : value,
-			Op	  : op}
+			Op	  : op,
+		}
 		reply := PutAppendReply{}
 		ok := ck.servers[server].Call("KVServer.PutAppend", &args, &reply)
 		if ok {

@@ -60,6 +60,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm	 int
 }
 
 type RaftState	int32 
@@ -851,7 +852,7 @@ func (rf *Raft) applyMsgRoutine() {
 		rf.mu.Unlock()
 
 		for index, log := range logs {
-			rf.applyCh <- ApplyMsg{true, log.Command, beginApplied + index}
+			rf.applyCh <- ApplyMsg{true, log.Command, beginApplied + index, log.LogTerm}
 
 			if _, isLeader := rf.GetState(); isLeader {
 				DPrintf(whiteFormat+"(applyMsg leader) role: %v, index: %v, command: %v"+defaultFormat,
