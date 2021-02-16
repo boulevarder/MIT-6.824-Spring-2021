@@ -840,19 +840,27 @@ func (rf *Raft) bgRoutine() {
 func (rf *Raft) applyMsgRoutine() {
 	for !rf.killed() {
 		rf.mu.Lock()
-		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-			rf.applyCh <- ApplyMsg{true, rf.logs[i].Command, i}
+		logs := []LogType{}
 
-			if rf.state == LeaderState {
-				DPrintf(whiteFormat+"(applyMsg leader) role: %v, index: %v, command: %v"+defaultFormat,
-					rf.me, i, rf.logs[i].Command)
-			} else {
-				DPrintf(whiteFormat+"(applyMsg) role: %v, index: %v, command: %v"+defaultFormat,
-					rf.me, i, rf.logs[i].Command)
-			}
-		} 
+		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+			logs = append(logs, rf.logs[i])
+		}
+		beginApplied := rf.lastApplied + 1
+
 		rf.lastApplied = rf.commitIndex
 		rf.mu.Unlock()
+
+		for index, log := range logs {
+			rf.applyCh <- ApplyMsg{true, log.Command, beginApplied + index}
+
+			if _, isLeader := rf.GetState(); isLeader {
+				DPrintf(whiteFormat+"(applyMsg leader) role: %v, index: %v, command: %v"+defaultFormat,
+					rf.me, beginApplied + index, log.Command)
+			} else {
+				DPrintf(whiteFormat+"(applyMsg) role: %v, index: %v, command: %v"+defaultFormat,
+					rf.me, beginApplied + index, log.Command)
+			}
+		} 
 
 		rf.applyCond.L.Lock()
 		rf.applyCond.Wait()
