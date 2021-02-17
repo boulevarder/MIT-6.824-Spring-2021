@@ -8,9 +8,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
 	"strconv"
 )
+
+const Debug = 1
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 var (
 	redFormat		string = "\033[35m"
@@ -20,31 +28,21 @@ var (
 	defaultFormat	string = "\033[0m"
 )
 
-const Debug = 1
-
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
-}
-
-type OpType	int
+type OpType int
 const (
 	GetType		OpType = 0
 	PutType		OpType = 1
-	AppendType	OpType = 2
-	InvalidType	OpType = 3
+	AppendType 	OpType = 2
 )
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Key		string
-	Value	string
-	Type	OpType
+	Key			string
+	Value		string
+	Type 		OpType
+	RandNum		int64
 }
 
 type KVServer struct {
@@ -58,62 +56,194 @@ type KVServer struct {
 
 	// Your definitions here.
 	kvMap				map[string] string
-
-	applyIndex 			int
-
-	waitIndexMapTerm	map[int] int
+	
+	applyIndex			int
 
 	waitApplyCond		sync.Cond
 	informApplyCond		sync.Cond
-	
-	identifyToResult 	map[string] Result
+
+	waitIndexMapTerm	map[int] int
+	identifyToResult	map[string] StoreState
+
+	clearIdentifyCh		chan string
 }
 
-type Result struct {
-	Value		string
-	Err			Err
-	Exist 		bool
-}
 
-func (kv *KVServer) waitResult(identify string) (Err, string) {
-	for {
-		kv.mu.Lock()
-		result, keyExist := kv.identifyToResult[identify]
-		kv.mu.Unlock()
-
-		if keyExist {
-			if keyExist {
-				switch(result.Err){
-				case OK:
-					return OK, result.Value
-				case ErrNoKey:
-					return ErrNoKey, ""
-				}
-			} else {
-				kv.waitApply()
-				continue
-			}
-		} else {
-			return ErrWrongLeader, ""
-		}
-	}
-}
-
-func (kv *KVServer) sendToRaft_waitCommit(command Op, identify string) (Err, string) {
-	// 进来时是加锁的
+func (kv *KVServer) solveGetOp(command Op) (Err, string) {
+	kv.mu.Lock()
 	index, startTerm, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		kv.mu.Unlock()
 		return ErrWrongLeader, ""
 	}
 
-	kv.identifyToResult[identify] = Result {
-		Exist : false, 
+	kv.waitIndexMapTerm[index] = startTerm
+	kv.mu.Unlock()
+
+	DPrintf(redFormat + "(solveGetOp begin) role: %v, type: %v, index: %v, term: %v"+defaultFormat,
+			kv.me, command.Type, index, startTerm)
+	go func() {
+		for !kv.killed() {
+			time.Sleep(time.Millisecond * time.Duration(100))
+
+			kv.mu.Lock()
+			_, exist := kv.waitIndexMapTerm[index]
+
+			if !exist {
+				kv.mu.Unlock()
+				return
+			}
+
+			if kv.applyIndex == index {
+				kv.mu.Unlock()
+				kv.informOp()
+				continue
+			}
+
+			if kv.applyIndex < index {
+				raftTerm, _ := kv.rf.GetState()
+
+				if raftTerm != startTerm {
+					kv.waitIndexMapTerm[index] = -1
+					DPrintf(whiteFormat+"(solveGetOp term outdated) role: %v, index: %v"+defaultFormat,
+						kv.me, index)
+					kv.mu.Unlock()
+
+					kv.informOp()
+					continue
+				}
+			} else {
+				log.Fatal(warnFormat+"(solveGetOp timer) role: %v, kv.applyIndex > index, never happend"+defaultFormat,
+						kv.me)
+			}
+			kv.mu.Unlock()
+		}
+	}()
+
+	for !kv.killed() {
+		kv.waitApply()
+
+		kv.mu.Lock()
+		commitTerm, exist := kv.waitIndexMapTerm[index]
+
+		if !exist {
+			log.Fatalf(warnFormat+"(solveGetOp) role: %v, index: %v not exist waitIndexMapTerm"+defaultFormat,
+				kv.me, index)
+		}
+
+		if commitTerm == -1 {
+			delete(kv.waitIndexMapTerm, index)
+			DPrintf(redFormat+"(solveGetOp log truncated) role: %v, index: %v, startTerm: %v, commitTerm: -1"+defaultFormat,
+					kv.me, index, startTerm)
+			kv.mu.Unlock()
+
+			return ErrWrongLeader, ""
+		}
+
+		if kv.applyIndex < index {
+			kv.mu.Unlock()
+
+			kv.informApply()
+			continue
+		}
+
+		if kv.applyIndex == index {
+			delete(kv.waitIndexMapTerm, index)
+			if commitTerm == startTerm {
+				value, keyExist := kv.kvMap[command.Key]
+				kv.mu.Unlock()
+
+				kv.informApply()
+				if keyExist {
+					DPrintf(redFormat+"(solveGetOp, get successed) role: %v, index: %v"+defaultFormat,
+						kv.me, index)
+					return OK, value
+				} else {
+					DPrintf(redFormat+"(solveGetOp, get NoKey) role: %v, index: %v"+defaultFormat,
+						kv.me, index)
+					return ErrNoKey, ""
+				}
+			} else {
+				log.Fatalf(warnFormat+"(error, solveGetOp) role: %v, startTerm: %v != commitTerm: %v"+defaultFormat,
+					kv.me, startTerm, commitTerm)
+			}
+		} else if kv.applyIndex < index {
+			kv.mu.Unlock()
+			kv.informApply()
+			continue
+		} else {
+			log.Fatalf(warnFormat+"(error, solveGetOp) role: %v, kv.applyIndex: %v > index: %v"+defaultFormat,
+				kv.me, kv.applyIndex, index)
+		}
+	}
+	return ErrWrongLeader, ""
+}
+
+func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	// Your code here.
+	command := Op {
+		Key		: args.Key,
+		Type 	: GetType,
+	}
+
+	err, value := kv.solveGetOp(command)
+	reply.Err = err
+	reply.Value = value
+	return 
+}
+
+type State int 
+
+const (
+	OKState		State = 0
+	OtherLeader State = 2
+)
+
+type StoreState struct {
+	value			string
+	state 			State
+	alreadyCommit	bool
+}
+
+func (kv *KVServer) waitResult(identify string) Err {
+	for !kv.killed() {
+		kv.mu.Lock()
+		storeState, exist := kv.identifyToResult[identify]
+		kv.mu.Unlock()
+
+		if exist {
+			if storeState.alreadyCommit {
+				switch(storeState.state){
+				case OKState:
+					return OK
+				case OtherLeader:
+					return OK
+				}
+			} else {
+				kv.waitApply()
+				continue
+			}
+		} else {
+			return ErrWrongLeader
+		}
+	}
+	return ErrWrongLeader
+}
+
+func (kv *KVServer) solvePutAppendOp(command Op, identify string) Err {
+	index, startTerm, isLeader := kv.rf.Start(command)
+	if !isLeader {
+		kv.mu.Unlock()
+		return ErrWrongLeader
+	}
+	
+	kv.identifyToResult[identify] = StoreState {
+		alreadyCommit : false,
 	}
 	kv.waitIndexMapTerm[index] = startTerm
 	kv.mu.Unlock()
 
-	DPrintf(redFormat + "(sendToRaft begin) role: %v, type: %v, index: %v, term: %v"+defaultFormat,
+	DPrintf(redFormat + "(solvePutAppendOp begin) role: %v, type: %v, index: %v, term: %v"+defaultFormat,
 			kv.me, command.Type, index, startTerm)
 	go func() {
 		for !kv.killed() {
@@ -125,15 +255,8 @@ func (kv *KVServer) sendToRaft_waitCommit(command Op, identify string) (Err, str
 			
 			if !exist {
 				kv.mu.Unlock()
-				
-				time.AfterFunc(3 * time.Second, func() {
-					kv.mu.Lock()
-					if _, exist := kv.identifyToResult[identify]; exist {
-						delete(kv.identifyToResult, identify)
-					}
-					kv.mu.Unlock()
-				})
-				return
+				kv.clearIdentifyCh <- identify
+				return 
 			}
 
 			if kv.applyIndex == index {
@@ -142,34 +265,47 @@ func (kv *KVServer) sendToRaft_waitCommit(command Op, identify string) (Err, str
 				kv.informOp()
 				continue
 			}
-			
-			if kv.applyIndex < index {
-				invalidCommand := Op {
-					Type : InvalidType,
-				}
 
-				raftIndex, _, _ := kv.rf.Start(invalidCommand)
-				if raftIndex <= index {
+			if kv.applyIndex < index {
+				raftTerm, _ := kv.rf.GetState()
+
+				if raftTerm != startTerm {
 					kv.waitIndexMapTerm[index] = -1
 					kv.mu.Unlock()
-
+					DPrintf(whiteFormat+"(solvePutAppend term outdated) role: %v, index: %v"+defaultFormat,
+						kv.me, index)
 					kv.informOp()
 					continue
 				}
 			} else {
-				log.Fatal(warnFormat+"(sendToRaft_waitCommit timer) role: %v, kv.applyIndex > index, never happend"+defaultFormat,
-						kv.me)
+				log.Fatalf(warnFormat+"(solvePutAppendOp, timer) role: %v, kv.applyIndex: %v > index: %v, never happend"+defaultFormat,
+						kv.me, kv.applyIndex, index)
 			}
 			kv.mu.Unlock()
 		}
 	}()
 
-	isGetType := (command.Type == GetType)
-
 	for !kv.killed() {
 		kv.waitApply()
 
 		kv.mu.Lock()
+		commitTerm, exist := kv.waitIndexMapTerm[index]
+
+		if !exist {
+			log.Fatalf(warnFormat+"(solvePutAppendOp) role: %v, index: %v not exist in waitIndexMapTerm"+defaultFormat, 
+				kv.me, index)
+		}
+
+		if commitTerm == -1 {
+			DPrintf(redFormat+"(solvePutAppendOp, log truncated) role: %v, index: %v, startTerm: %v, commitTerm: -1"+defaultFormat,
+					kv.me, index, startTerm)
+			delete(kv.waitIndexMapTerm, index)
+			delete(kv.identifyToResult, identify)
+			kv.mu.Unlock()
+			
+			return ErrWrongLeader
+		}
+
 		if kv.applyIndex < index {
 			kv.mu.Unlock()
 
@@ -177,108 +313,41 @@ func (kv *KVServer) sendToRaft_waitCommit(command Op, identify string) (Err, str
 			continue
 		}
 
-		mapTerm, exist := kv.waitIndexMapTerm[index]
-
-		if !exist {
-			log.Fatalf(warnFormat+"(sendToRaft_waitCommit) role: %v, not exist in waitIndexMapTerm", kv.me)
-		}
-
 		if kv.applyIndex == index {
 			delete(kv.waitIndexMapTerm, index)
-			if mapTerm == startTerm {
-				var value string
-				var keyExist bool
-				if isGetType {
-					value, keyExist = kv.kvMap[command.Key]
+			if commitTerm == startTerm {
+				DPrintf(redFormat+"(solvePutAppendOp, putAppend succeed) role: %v, index: %v"+defaultFormat,
+					kv.me, index)
+				kv.identifyToResult[identify] = StoreState {
+					state 			: OKState,
+					alreadyCommit	: true,
 				}
 				kv.mu.Unlock()
 
 				kv.informApply()
-
-				if isGetType {
-					if keyExist {
-						DPrintf(redFormat+"(sendToRaft, get succeed) role: %v, index: %v"+defaultFormat, kv.me, index)
-						kv.identifyToResult[identify] = Result {
-							Value	: value,
-							Err		: OK,
-							Exist	: true,
-						}
-						return OK, value
-					} else {
-						DPrintf(redFormat+"(sendToRaft, get nokey) role: %v, index: %v "+defaultFormat, kv.me, index)
-						kv.identifyToResult[identify] = Result {
-							Value	: value,
-							Err		: ErrNoKey,
-							Exist	: true,
-						}
-						return ErrNoKey, ""
-					}
-				} else {
-					DPrintf(redFormat+"(sendToRaft, put succeed), role: %v, index: %v"+defaultFormat, kv.me, index)
-					kv.identifyToResult[identify] = Result {
-						Err		: OK,
-						Exist	: true,
-					}
-					return OK, ""
-				} 
-			} else if mapTerm == -1 {
-				DPrintf(redFormat+"(sendToRaft, log truncated) role: %v, index: %v, startTerm: %v"+defaultFormat,
-					kv.me, index, startTerm)
-				delete(kv.identifyToResult, identify)
-				return ErrWrongLeader, ""
+				return OK
 			} else {
-				log.Fatalf(warnFormat+"(error, sendToRaft) role: %v, mapTerm: %v != startTerm: %v"+defaultFormat,
-					kv.me, mapTerm, startTerm)
+				log.Fatalf(warnFormat+"(error, solvePutAppendOp) role: %v, commitTerm: %v != startTerm: %v"+defaultFormat,
+					kv.me, commitTerm, startTerm)
 			}
 		} else if kv.applyIndex < index {
 			kv.mu.Unlock()
 			kv.informApply()
 			continue
 		} else {
-			log.Fatal(warnFormat+"(error, sendToRaft) role: %v, kv.applyIndex: %v > index: %v"+defaultFormat,
+			log.Fatal(warnFormat+"(error, solvePutAppendOp) role: %v, kv.applyIndex: %v > index: %v"+defaultFormat,
 				kv.me, kv.applyIndex, index)
 		}
 	}
-	return "killed", ""
+	return ErrWrongLeader
 }
-
-
-
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
-	command := Op {
-		Key		: args.Key,
-		Type	: GetType,
-	}
-
-	identify := computeIdentify(args.RandNum, args.Key)
-
-	kv.mu.Lock()
-	_, keyExist := kv.identifyToResult[identify]
-
-	if keyExist {
-		kv.mu.Unlock()
-
-		err, value := kv.waitResult(identify)
-
-		reply.Err = err
-		reply.Value = value
-		return
-	} else {
-		err, value := kv.sendToRaft_waitCommit(command, identify)
-
-		reply.Err = err
-		reply.Value = value
-		return
-	}
-}
-
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	command := Op {
-		Key		: args.Key,
+		Key 	: args.Key,
 		Value	: args.Value,
+		RandNum	: args.RandNum,
 	}
 
 	switch(args.Op) {
@@ -291,21 +360,20 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	identify := computeIdentify(args.RandNum, args.Key)
 
 	kv.mu.Lock()
-	_, keyExist := kv.identifyToResult[identify]
+	_, exist := kv.identifyToResult[identify]
 
-	if keyExist {
+	if exist {
 		kv.mu.Unlock()
-		err, _ := kv.waitResult(identify)
-		
+		err := kv.waitResult(identify)
+
 		reply.Err = err
 		return
 	} else {
-		err, _ := kv.sendToRaft_waitCommit(command, identify)
+		err := kv.solvePutAppendOp(command, identify)
 
 		reply.Err = err
 		return
 	}
-
 }
 
 //
@@ -327,72 +395,6 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
-}
-
-func (kv *KVServer) receiveApplyMsg() {
-	for apply := range kv.applyCh {
-		if apply.CommandValid == false {
-			continue
-		}
-		if _, isLeader := kv.rf.GetState(); isLeader {
-			DPrintf(blueFormat+"(applyMsg leader) role: %v, commandIndex: %v"+defaultFormat,
-				kv.me, apply.CommandIndex)
-		} else {
-			DPrintf(blueFormat+"(applyMsg) role: %v, commandIndex: %v"+defaultFormat,
-				kv.me, apply.CommandIndex)
-		}
-
-		kv.mu.Lock()
-		if kv.applyIndex < apply.CommandIndex { 
-			command := apply.Command.(Op)
-			switch(command.Type) {
-			case PutType:
-				kv.kvMap[command.Key] = command.Value
-			case AppendType:
-				kv.kvMap[command.Key] += command.Value
-			case GetType:
-			case InvalidType:
-			}
-
-			kv.applyIndex = apply.CommandIndex
-		} else {
-			DPrintf(blueFormat+"(receiveApplyMsg role: %v) multiple apply, kv.applyIndex: %v >= apply.CommandIndex: %v"+defaultFormat,
-				kv.me, kv.applyIndex, apply.CommandIndex)
-		}
-
-		mapTerm, exist := kv.waitIndexMapTerm[apply.CommandIndex]
-		for exist {
-			if mapTerm != apply.CommandTerm {
-				DPrintf(blueFormat+"(receiveApplyMsg) role: %v, index: %v, startTerm: %v, mapTerm: %v"+defaultFormat,
-					kv.me, apply.CommandIndex, mapTerm, apply.CommandTerm)
-				kv.waitIndexMapTerm[apply.CommandIndex] = -1
-			}
-			kv.mu.Unlock()
-
-			kv.informOp()
-			kv.waitOp()
-
-			kv.mu.Lock()
-			mapTerm, exist = kv.waitIndexMapTerm[apply.CommandIndex]
-		}
-		kv.mu.Unlock()
-	}
-}
-
-
-func (kv *KVServer) wakeupRoutine() {
-	for !kv.killed() {
-		time.Sleep(time.Millisecond * time.Duration(50))
-		kv.mu.Lock()
-
-		if _, exist := kv.waitIndexMapTerm[kv.applyIndex]; exist {
-			kv.informOp()
-		} else {
-			kv.informApply()
-		}
-
-		kv.mu.Unlock()
-	}
 }
 
 
@@ -425,18 +427,121 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+
 	kv.kvMap = make(map[string] string)
 
-	kv.waitIndexMapTerm = make(map[int] int)
+	kv.applyIndex = 0
+
 	kv.waitApplyCond.L = new(sync.Mutex)
 	kv.informApplyCond.L = new(sync.Mutex)
 
-	kv.identifyToResult = make(map[string] Result)
-	
-	go kv.receiveApplyMsg()
+	kv.waitIndexMapTerm = make(map[int] int)
+	kv.identifyToResult = make(map[string] StoreState)
+
+	kv.clearIdentifyCh = make(chan string, 1)
+
+	go kv.clearIdentifyRoutine()
 	go kv.wakeupRoutine()
+	go kv.receiveApplyMsgRoutine()
 
 	return kv
+}
+
+func (kv *KVServer) receiveApplyMsgRoutine() {
+	for apply := range kv.applyCh {
+		if apply.CommandValid == false {
+			continue
+		}
+
+		if _, isLeader := kv.rf.GetState(); isLeader {
+			DPrintf(blueFormat+"(applyMsg leader) role: %v, commandIndex: %v"+defaultFormat,
+			kv.me, apply.CommandIndex)
+		} else {
+			DPrintf(blueFormat+"(applyMsg) role: %v, commandIndex: %v"+defaultFormat,
+				kv.me, apply.CommandIndex)
+		}
+
+		kv.mu.Lock()
+		if kv.applyIndex < apply.CommandIndex {
+			command := apply.Command.(Op)
+			identify := computeIdentify(command.RandNum, command.Key)
+
+			storeState, exist := kv.identifyToResult[identify]
+			if exist == false || storeState.alreadyCommit == false {
+				switch(command.Type) {
+				case PutType:
+					kv.kvMap[command.Key] = command.Value
+				case AppendType:
+					kv.kvMap[command.Key] += command.Value
+				case GetType:
+				}
+
+				if exist == false && command.Type != GetType {
+					kv.identifyToResult[identify] = StoreState {
+						state			: OtherLeader,
+						alreadyCommit 	: true,
+					}
+					kv.clearIdentifyCh <- identify
+				}
+			}
+			kv.applyIndex = apply.CommandIndex
+		} else {
+			DPrintf(blueFormat+"(receiveApplyMsg role: %v) multiple apply, kv.applyIndex: %v >= apply.CommandIndex: %v"+defaultFormat,
+				kv.me, kv.applyIndex, apply.CommandIndex)
+			}
+
+		startTerm, exist := kv.waitIndexMapTerm[apply.CommandIndex]
+		for exist {
+			if startTerm != apply.CommandTerm {
+				DPrintf(blueFormat+"(receiveApplyMsg) role: %v, index: %v, startTerm: %v, applyTerm: %v"+defaultFormat,
+					kv.me, apply.CommandIndex, startTerm, apply.CommandTerm)
+				kv.waitIndexMapTerm[apply.CommandIndex] = -1
+			}
+			kv.mu.Unlock()
+
+			kv.informOp()
+			kv.waitOp()
+
+			kv.mu.Lock()
+			startTerm, exist = kv.waitIndexMapTerm[apply.CommandIndex]
+		}
+		DPrintf(whiteFormat+"(receiveApplyMsgRoutine)role: %v, index: %v"+defaultFormat, kv.me, apply.CommandIndex)
+		kv.mu.Unlock()
+	}
+}
+
+
+func (kv *KVServer) wakeupRoutine() {
+	for !kv.killed() {
+		time.Sleep(time.Millisecond * time.Duration(50))
+		kv.mu.Lock()
+		if _, exist := kv.waitIndexMapTerm[kv.applyIndex]; exist {
+			kv.informOp()
+		} else {
+			kv.informApply()
+		}
+		kv.mu.Unlock()
+	}
+}
+
+
+func (kv *KVServer) clearIdentifyRoutine() {
+
+	for identify := range kv.clearIdentifyCh {
+		go func(i string) {
+			time.AfterFunc(3 * time.Second, func() {
+				kv.mu.Lock()
+				if _, exist := kv.identifyToResult[i]; exist {
+					delete(kv.identifyToResult, i)
+				}
+				kv.mu.Unlock()
+			})
+		}(identify)
+
+		if kv.killed() {
+			return
+		}
+	}
 }
 
 

@@ -13,10 +13,10 @@ type PutAppendArgs struct {
 	Key   		string
 	Value 		string
 	Op    		string // "Put" or "Append"
-	RandNum		int64
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	RandNum		int64
 }
 
 type PutAppendReply struct {
@@ -24,8 +24,7 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key			string
-	RandNum		int64		
+	Key 		string
 	// You'll have to add definitions here.
 }
 
