@@ -850,6 +850,7 @@ func (rf *Raft) applyMsgRoutine() {
 		rf.lastApplied = rf.commitIndex
 		rf.mu.Unlock()
 
+		
 		for index, log := range logs {
 			rf.applyCh <- ApplyMsg{true, log.Command, beginApplied + index}
 
@@ -861,6 +862,13 @@ func (rf *Raft) applyMsgRoutine() {
 					rf.me, beginApplied + index, log.Command)
 			}
 		} 
+		
+		rf.mu.Lock()
+		if rf.lastApplied != rf.commitIndex {
+			rf.mu.Unlock()
+			continue
+		}
+		rf.mu.Unlock()
 
 		rf.applyCond.L.Lock()
 		rf.applyCond.Wait()
