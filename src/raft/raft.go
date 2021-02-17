@@ -645,7 +645,7 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 		if args.PrevLogIndex + len(args.Entries) > rf.matchIndex[i] {
 			rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
 		
-			if len(args.Entries) > 0 && rf.logs[args.PrevLogIndex + 1].LogTerm == rf.currentTerm && 
+			if len(args.Entries) > 0 && rf.logs[rf.matchIndex[i]].LogTerm == rf.currentTerm && 
 					rf.commitIndex < rf.matchIndex[i] {
 				go rf.computeCommitIndex(args.Term)
 			}
