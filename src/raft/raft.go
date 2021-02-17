@@ -863,6 +863,13 @@ func (rf *Raft) applyMsgRoutine() {
 			}
 		} 
 
+		rf.mu.Lock()
+		if rf.lastApplied != rf.commitIndex {
+			rf.mu.Unlock()
+			continue
+		}
+		rf.mu.Unlock()
+
 		rf.applyCond.L.Lock()
 		rf.applyCond.Wait()
 		rf.applyCond.L.Unlock()
