@@ -41,6 +41,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
+	randNum := nrand()
 	ck.mu.Lock()
 	server := ck.leader
 	ck.mu.Unlock()
@@ -48,6 +49,7 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		args := GetArgs {
 			Key		: key,
+			RandNum : randNum,
 		}
 		reply := GetReply{}
 		ok := ck.servers[server].Call("KVServer.Get", &args, &reply)

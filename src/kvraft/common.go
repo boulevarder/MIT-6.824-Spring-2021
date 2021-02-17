@@ -26,6 +26,7 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key 		string
 	// You'll have to add definitions here.
+	RandNum		int64
 }
 
 type GetReply struct {
