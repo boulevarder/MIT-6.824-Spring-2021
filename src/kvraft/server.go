@@ -80,8 +80,8 @@ func (kv *KVServer) solveGetOp(command Op) (Err, string) {
 	kv.waitIndexMapTerm[index] = startTerm
 	kv.mu.Unlock()
 
-	DPrintf(redFormat + "(solveGetOp begin) role: %v, type: %v, index: %v, term: %v"+defaultFormat,
-			kv.me, command.Type, index, startTerm)
+	DPrintf(redFormat + "(solveGetOp begin) role: %v, type: %v, index: %v, term: %v, command: %v"+defaultFormat,
+			kv.me, command.Type, index, startTerm, command)
 	go func() {
 		for !kv.killed() {
 			time.Sleep(time.Millisecond * time.Duration(100))
@@ -164,8 +164,11 @@ func (kv *KVServer) solveGetOp(command Op) (Err, string) {
 					return ErrNoKey, ""
 				}
 			} else {
-				log.Fatalf(warnFormat+"(error, solveGetOp) role: %v, startTerm: %v != commitTerm: %v"+defaultFormat,
+				kv.mu.Unlock()
+				kv.informApply()
+				DPrintf(redFormat+"(solveGetOp, wrongleader(error)) role: %v, startTerm: %v != commitTerm: %v"+defaultFormat,
 					kv.me, startTerm, commitTerm)
+				return ErrWrongLeader, ""
 			}
 		} else if kv.applyIndex < index {
 			kv.mu.Unlock()
@@ -243,8 +246,8 @@ func (kv *KVServer) solvePutAppendOp(command Op, identify string) Err {
 	kv.waitIndexMapTerm[index] = startTerm
 	kv.mu.Unlock()
 
-	DPrintf(redFormat + "(solvePutAppendOp begin) role: %v, type: %v, index: %v, term: %v"+defaultFormat,
-			kv.me, command.Type, index, startTerm)
+	DPrintf(redFormat + "(solvePutAppendOp begin) role: %v, type: %v, index: %v, term: %v, command: %v"+defaultFormat,
+			kv.me, command.Type, index, startTerm, command)
 	go func() {
 		for !kv.killed() {
 			time.Sleep(time.Millisecond * time.Duration(100))
@@ -327,8 +330,16 @@ func (kv *KVServer) solvePutAppendOp(command Op, identify string) Err {
 				kv.informApply()
 				return OK
 			} else {
-				log.Fatalf(warnFormat+"(error, solvePutAppendOp) role: %v, commitTerm: %v != startTerm: %v"+defaultFormat,
+				DPrintf(warnFormat+"(solvePutAppendOp, other leader putAppend) role: %v, commitTerm: %v != startTerm: %v"+defaultFormat,
 					kv.me, commitTerm, startTerm)
+				kv.identifyToResult[identify] = StoreState {
+					state 			: OtherLeader,
+					alreadyCommit	: true,
+				}
+				kv.mu.Unlock()
+
+				kv.informApply()
+				return OK
 			}
 		} else if kv.applyIndex < index {
 			kv.mu.Unlock()
@@ -482,20 +493,25 @@ func (kv *KVServer) receiveApplyMsgRoutine() {
 						alreadyCommit 	: true,
 					}
 					kv.clearIdentifyCh <- identify
+				} else {
+					kv.identifyToResult[identify] = StoreState {
+						state 			: OKState,
+						alreadyCommit   : true,
+					}
 				}
 			}
 			kv.applyIndex = apply.CommandIndex
 		} else {
 			DPrintf(blueFormat+"(receiveApplyMsg role: %v) multiple apply, kv.applyIndex: %v >= apply.CommandIndex: %v"+defaultFormat,
 				kv.me, kv.applyIndex, apply.CommandIndex)
-			}
+		}
 
 		startTerm, exist := kv.waitIndexMapTerm[apply.CommandIndex]
 		for exist {
 			if startTerm != apply.CommandTerm {
 				DPrintf(blueFormat+"(receiveApplyMsg) role: %v, index: %v, startTerm: %v, applyTerm: %v"+defaultFormat,
 					kv.me, apply.CommandIndex, startTerm, apply.CommandTerm)
-				kv.waitIndexMapTerm[apply.CommandIndex] = -1
+				kv.waitIndexMapTerm[apply.CommandIndex] = apply.CommandTerm
 			}
 			kv.mu.Unlock()
 
@@ -505,7 +521,6 @@ func (kv *KVServer) receiveApplyMsgRoutine() {
 			kv.mu.Lock()
 			startTerm, exist = kv.waitIndexMapTerm[apply.CommandIndex]
 		}
-		DPrintf(whiteFormat+"(receiveApplyMsgRoutine)role: %v, index: %v"+defaultFormat, kv.me, apply.CommandIndex)
 		kv.mu.Unlock()
 	}
 }
