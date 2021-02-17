@@ -8,6 +8,7 @@ https://pdos.csail.mit.edu/6.824/
 	- [x] Part B: log - 2021.2.6
 	- [x] Part C: persistence - 2021.2.7
 - [ ] Raft K/V Service
+    - [x] Part A: Key/value service without log compaction
 - [ ] Sharded K/V Service
 	- [ ] Part A
 	- [ ] Part B
