@@ -409,7 +409,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	if rf.state == LeaderState {
 		term = rf.currentTerm
-		index = len(rf.logs)
+		index = rf.logIndex_local2global(len(rf.logs))
 		isLeader = true
 
 		rf.logs = append(rf.logs, LogType{command, term})
@@ -418,11 +418,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		DPrintf(warnFormat+"(Start) leaderId: %v, start: %v, commitIndex: %v, command: %v"+defaultFormat,
 			rf.me, index, rf.commitIndex, command)
 	} else {
-		isLeader = false		
+		isLeader = false
 	}
 	rf.mu.Unlock()
 
-	if isLeader{
+	if isLeader {
 		go rf.informAppendEntries()
 	}
 
@@ -475,8 +475,9 @@ func (rf *Raft) electionTimeout() {
 
 func (rf *Raft) voteForLeader() {
 	rf.mu.Lock()
-	DPrintf("(voteForLeader begin) Candidate: %v voteForLead, term: %v", rf.me, rf.currentTerm)
+	DPrintf("(voteForLeader begin) Candidate: %v voteForLeader, term: %v", rf.me, rf.currentTerm)
 	rf.haveMessagePeriod = false
+	voteTerm := rf.currentTerm
 	rf.mu.Unlock()
 
 	cond := sync.NewCond(new(sync.Mutex))
@@ -486,10 +487,10 @@ func (rf *Raft) voteForLeader() {
 
 	go func() {
 		electionTimeoutMs := getElectionTimeout()
-		
+
 		for i := 0; i < 4; i++ {
 			time.Sleep(time.Millisecond * time.Duration(electionTimeoutMs / 4))
-			
+
 			rf.mu.Lock()
 			if rf.state != CandidateState {
 				alreadyInform = true
@@ -507,25 +508,25 @@ func (rf *Raft) voteForLeader() {
 		cond.L.Unlock()
 	}()
 
-	go func(){
+	go func() {
 		rf.mu.Lock()
-		if rf.state != CandidateState {
+		if rf.currentTerm != voteTerm || rf.state != CandidateState {
 			rf.mu.Unlock()
 			return
 		}
 
 		args := RequestVoteArgs{}
-		args.Term = rf.currentTerm
+		args.Term = voteTerm
 		args.CandidateId = rf.me
-		args.LastLogIndex = len(rf.logs) - 1
-		args.LastLogTerm = rf.logs[args.LastLogIndex].LogTerm
+		args.LastLogIndex = rf.logIndex_local2global(len(rf.logs) - 1)
+		args.LastLogTerm = rf.logs[len(rf.logs)-1].LogTerm
 		rf.mu.Unlock()
 
 		for i := 0; i < serverTotal; i++ {
 			if i == rf.me {
 				continue
 			}
-			go func(i int){
+			go func(i int) {
 				reply := RequestVoteReply{}
 				ok := rf.peers[i].Call("Raft.RequestVote", &args, &reply)
 
@@ -536,7 +537,7 @@ func (rf *Raft) voteForLeader() {
 				rf.mu.Lock()
 				if reply.VoteGranted {
 					getVote++
-					if !alreadyInform && rf.currentTerm == args.Term && 
+					if !alreadyInform && rf.currentTerm == voteTerm &&
 							getVote > serverTotal / 2 {
 						rf.state = LeaderState
 						for i := 0; i < serverTotal; i++ {
@@ -549,10 +550,10 @@ func (rf *Raft) voteForLeader() {
 						cond.L.Lock()
 						cond.Broadcast()
 						cond.L.Unlock()
-						return 
+						return
 					}
 					rf.mu.Unlock()
-					return 
+					return
 				} else {
 					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
@@ -566,8 +567,6 @@ func (rf *Raft) voteForLeader() {
 			}(i)
 		}
 	}()
-
-
 
 	cond.L.Lock()
 	cond.Wait()
@@ -597,20 +596,21 @@ func (rf *Raft) voteForLeader() {
 
 
 func (rf *Raft) computeCommitIndex(term int) {
+	// 只能commit当前term的日志, 所以传进来term, 防止在两次加锁之间term转换了
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	commitIndexLeft := rf.commitIndex
-	for rf.logs[commitIndexLeft].LogTerm != term {
-		commitIndexLeft++
-		if len(rf.logs) == commitIndexLeft {
+	local_commitIndexLeft := rf.logIndex_global2local(rf.commitIndex)
+	for rf.logs[local_commitIndexLeft].LogTerm != term {
+		local_commitIndexLeft++
+		if len(rf.logs) == local_commitIndexLeft {
 			return
 		}
 	}
 
-	updateCommitIndex := 0
+	local_updateCommitIndex := 0
 	serverTotal := len(rf.peers)
-	for i := commitIndexLeft; i < len(rf.logs); i++ {
+	for i := local_commitIndexLeft; i < len(rf.logs); i++ {
 		num := 1
 
 		for j := 0; j < serverTotal; j++ {
@@ -624,13 +624,14 @@ func (rf *Raft) computeCommitIndex(term int) {
 		}
 
 		if num > serverTotal / 2 {
-			updateCommitIndex = i
+			local_updateCommitIndex = i
 		}
 	}
 
-	if updateCommitIndex > rf.commitIndex {
-		rf.commitIndex = updateCommitIndex
-		
+	global_updateCommitIndex := rf.logIndex_local2global(local_updateCommitIndex)
+	if global_updateCommitIndex > rf.commitIndex {
+		rf.commitIndex = global_updateCommitIndex
+
 		rf.applyCond.L.Lock()
 		rf.applyCond.Broadcast()
 		rf.applyCond.L.Unlock()
