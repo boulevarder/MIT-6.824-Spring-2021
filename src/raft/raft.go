@@ -702,36 +702,38 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 		rf.mu.Lock()
 		if rf.currentTerm != term || rf.state != LeaderState {
 			rf.mu.Unlock()
-			break
+			return
 		}
 		args := AppendEntriesArgs{}
 		args.Term = rf.currentTerm
 		args.LeaderId = rf.me
 		args.PrevLogIndex = rf.nextIndex[i] - 1
-		args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
+		local_args_prevLogIndex := rf.logIndex_global2local(args.PrevLogIndex)
+		args.PrevLogTerm = rf.logs[local_args_prevLogIndex].LogTerm
 
-		if args.PrevLogIndex + 1 < len(rf.logs) {
-			sendLogIndex := rf.nextIndex[i]
-			
-			sendLogIndexLeft := rf.nextIndex[i]
-			for rf.logs[sendLogIndexLeft].LogTerm == rf.logs[sendLogIndex].LogTerm {
-				sendLogIndexLeft--
+		local_matchIndex := rf.logIndex_global2local(rf.matchIndex[i])
+		if local_args_prevLogIndex + 1 < len(rf.logs) {
+			local_sendLogIndex := local_args_prevLogIndex + 1
 
-				if sendLogIndexLeft == rf.matchIndex[i] {
+			local_sendLogIndexLeft := local_sendLogIndex
+			for rf.logs[local_sendLogIndexLeft].LogTerm == rf.logs[local_sendLogIndex].LogTerm {
+				local_sendLogIndexLeft--
+
+				if local_sendLogIndexLeft == local_matchIndex {
 					break
 				}
 			}
-			sendLogIndexLeft++
+			local_sendLogIndexLeft++
 
-			if beforeSendSuccess {			
-				for i := sendLogIndexLeft; i < len(rf.logs); i++ {
+			if beforeSendSuccess {
+				for i := local_sendLogIndexLeft; i < len(rf.logs); i++ {
 					args.Entries = append(args.Entries, rf.logs[i])
 				}
 			} else {
-				args.Entries = append(args.Entries, rf.logs[sendLogIndexLeft])
+				args.Entries = append(args.Entries, rf.logs[local_sendLogIndexLeft])
 			}
-			args.PrevLogIndex = sendLogIndexLeft - 1
-			args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
+			args.PrevLogIndex = rf.logIndex_local2global(local_sendLogIndexLeft - 1)
+			args.PrevLogTerm = rf.logs[local_sendLogIndexLeft - 1].LogTerm
 
 			rf.nextIndex[i] = args.PrevLogIndex
 			if rf.nextIndex[i] <= rf.matchIndex[i] {
@@ -764,7 +766,7 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 		}
 
 		rf.mu.Lock()
-		if len(rf.logs) - 2 >= rf.matchIndex[i] || rf.currentTerm != term {
+		if rf.logIndex_local2global(len(rf.logs) - 2) >= rf.matchIndex[i] || rf.currentTerm != term {
 			rf.mu.Unlock()
 			continue
 		}
