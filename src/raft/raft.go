@@ -641,13 +641,13 @@ func (rf *Raft) computeCommitIndex(term int) {
 func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	
+
 	if rf.currentTerm != args.Term {
 		return false
 	}
 
 	if reply.Success {
-		if len(args.Entries) == 0 && len(rf.logs) - 2 >= rf.matchIndex[i] {
+		if len(args.Entries) == 0 && rf.logIndex_local2global(len(rf.logs)-2) >= rf.matchIndex[i] {
 			rf.newLogConds[i].L.Lock()
 			rf.newLogConds[i].Broadcast()
 			rf.newLogConds[i].L.Unlock()
@@ -655,12 +655,13 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 
 		if args.PrevLogIndex + len(args.Entries) > rf.matchIndex[i] {
 			rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
-		
-			if len(args.Entries) > 0 && rf.logs[rf.matchIndex[i]].LogTerm == rf.currentTerm && 
-					rf.commitIndex < rf.matchIndex[i] {
+
+			if rf.matchIndex[i] > rf.commitIndex && len(args.Entries) > 0 &&
+					rf.logs[rf.logIndex_global2local(rf.matchIndex[i])].LogTerm == rf.currentTerm {
 				go rf.computeCommitIndex(args.Term)
 			}
 		}
+
 		if args.PrevLogIndex + len(args.Entries) + 1 > rf.nextIndex[i] {
 			rf.nextIndex[i] = args.PrevLogIndex + len(args.Entries) + 1
 		}
@@ -672,7 +673,7 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 	} else {
 		if args.Term < reply.Term {
 			DPrintf("(solveAppendEntriesReply term outdated) %v(argsTerm: %v, currentTerm: %v) -> %v(term: %v)",
-				rf.me, args.Term, rf.currentTerm, i,  reply.Term)
+				rf.me, args.Term, rf.currentTerm, i, reply.Term)
 
 			if rf.currentTerm < reply.Term {
 				rf.currentTerm = reply.Term
@@ -685,9 +686,10 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 			rf.nextIndex[i] = args.PrevLogIndex
 			if rf.nextIndex[i] < rf.matchIndex[i] + 1 {
 				rf.nextIndex[i] = rf.matchIndex[i] + 1
-			} 
-			DPrintf("(solveAppendEntriesReply log inconsistency) %v -> %v, args.PrevLogIndex: %v, args.PrevLogTerm: %v, nextIndex: %v, matchIndex: %v",
-				rf.me, i, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[i], rf.matchIndex[i])
+			}
+			DPrintf("(solveAppendEntriesReply log inconsistency) %v -> %v, args.PrevLogIndex: %v, args.PrevLogTerm: %v"+
+					"nextIndex: %v, matchIndex: %v", rf.me, i, args.PrevLogIndex, args.PrevLogTerm, 
+					rf.nextIndex[i], rf.matchIndex[i])
 		}
 		return false
 	}
