@@ -25,6 +25,7 @@ import "math/rand"
 
 import "bytes"
 import "../labgob"
+import "log"
 
 
 var (
@@ -105,6 +106,8 @@ type Raft struct {
 	haveMessagePeriod	bool
 	newLogConds			[]*sync.Cond
 	applyCond			sync.Cond
+
+	logIndexBefore	int 
 }
 
 // return currentTerm and whether this server
@@ -172,7 +175,7 @@ func (rf *Raft) readPersist(data []byte) {
 	if d.Decode(&currentTerm) != nil ||
 	   d.Decode(&votedFor) != nil ||
 	   d.Decode(&logs) != nil {
-		DPrintf(warnFormat+"====================== (readPersist) error ==========================="+defaultFormat)
+		log.Fatalf(warnFormat+"====================== (readPersist) error ==========================="+defaultFormat)
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
@@ -197,9 +200,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 
 	if args.Term < rf.currentTerm {
-		DPrintf("(RequestVote handler false, term outdated %v(term: %v) -> %v(term: %v)",
+		DPrintf("(RequestVote handler false, term outdated) %v(term: %v) -> %v(term: %v)",
 			args.CandidateId, args.Term, rf.me, rf.currentTerm)
-
+		
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
@@ -216,37 +219,41 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			needPersist = true
 		}
 
-		reply.Term = rf.currentTerm 
-		lastLogIndex := len(rf.logs) - 1
-		lastLogTerm := rf.logs[lastLogIndex].LogTerm
+		reply.Term = rf.currentTerm
+		local_args_lastLogIndex := rf.logIndex_global2local(args.LastLogIndex)
+		local_lastLogIndex := len(rf.logs) - 1
+		lastLogTerm := rf.logs[local_lastLogIndex].LogTerm
 		// election restriction
-		if lastLogTerm < args.LastLogTerm || (lastLogTerm == args.LastLogTerm && lastLogIndex <= args.LastLogIndex) {
-			DPrintf("(RequestVote handler true) %v(term: %v, len(logs): %v, log term: %v) -> %v(term: %v, len(logs): %v, log term: %v)",
-				args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm, rf.me, rf.currentTerm, lastLogIndex, lastLogTerm)
+		if lastLogTerm < args.LastLogTerm || (lastLogTerm == args.LastLogTerm && local_lastLogIndex <= local_args_lastLogIndex) {
+			DPrintf("(RequestVote handler true) %v(term: %v, LastLogIndex: %v, LastLogTerm: %v) -> %v(LastLogIndex: %v, LastLogTerm: %v)",
+				args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm, rf.me, 
+				rf.logIndex_local2global(local_lastLogIndex), lastLogTerm)
 
 			rf.haveMessagePeriod = true
 
 			rf.votedFor = args.CandidateId
-
+			
 			reply.VoteGranted = true
 			rf.persist()
 			return
 		}
-		
+
 		if needPersist {
 			rf.persist()
 		}
 
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		DPrintf("(RequestVote handler false) %v(term: %v, len(logs): %v, log term: %v) -> %v(term: %v, len(logs): %v, log term: %v)",
-			args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm, rf.me, rf.currentTerm, lastLogIndex, lastLogTerm)
-		return 
+		DPrintf("(RequestVote handler false, log not new) %v(term: %v, LastLogIndex: %v, LastLogTerm: %v) -> %v(LastLogIndex: %v, LastLogTerm: %v",
+			args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm, rf.me, 
+			rf.logIndex_local2global(local_lastLogIndex), lastLogTerm)
+		return
 	}
-	reply.Term = rf.currentTerm
-	reply.VoteGranted = false 
-	DPrintf("(RequestVote handler false, already vote %v) %v(term %v) -> %v(term %v)",
+
+	DPrintf("(RequestVote handler false, already vote: %v) %v(term: %v) -> %v(term: %v)",
 		rf.votedFor, args.CandidateId, args.Term, rf.me, rf.currentTerm)
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
 }
 
 type AppendEntriesArgs struct {
@@ -268,7 +275,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	if rf.currentTerm <= args.Term {
-
 		needPersist := false
 
 		rf.haveMessagePeriod = true
@@ -281,15 +287,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 
 		reply.Term = rf.currentTerm
-
-		prevLogIndex := args.PrevLogIndex
-		if prevLogIndex < len(rf.logs) && args.PrevLogTerm == rf.logs[prevLogIndex].LogTerm {
+		
+		local_args_prevLogIndex := rf.logIndex_global2local(args.PrevLogIndex)
+		if local_args_prevLogIndex < len(rf.logs) && args.PrevLogTerm == rf.logs[local_args_prevLogIndex].LogTerm {
 
 			entryConflict := false
 			for i := 0; i < len(args.Entries); i++ {
-				if prevLogIndex + 1 + i < len(rf.logs) {
-					if entryConflict || rf.logs[prevLogIndex+1+i].LogTerm != args.Entries[i].LogTerm {
-						rf.logs[prevLogIndex+1+i] = args.Entries[i]
+				if local_args_prevLogIndex + 1 + i < len(rf.logs) {
+					if entryConflict || rf.logs[local_args_prevLogIndex + 1 + i].LogTerm != args.Entries[i].LogTerm {
+						rf.logs[local_args_prevLogIndex+1+i] = args.Entries[i]
 						entryConflict = true
 						needPersist = true
 					}
@@ -299,27 +305,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				}
 			}
 			if entryConflict {
-				rf.logs = rf.logs[0:prevLogIndex + len(args.Entries) + 1]
+				// arr[start:end]: [start, end)
+				rf.logs = rf.logs[0: local_args_prevLogIndex+len(args.Entries)+1]
 			}
-
-
-			commitIndex := args.PrevLogIndex + len(args.Entries)
-
+			
+			local_commitIndex := local_args_prevLogIndex + len(args.Entries)
 			for {
-				if commitIndex + 1 <= len(rf.logs)-1 && rf.logs[commitIndex+1].LogTerm == args.Term {
-					commitIndex++
+				if local_commitIndex + 1 <= len(rf.logs) - 1 && rf.logs[local_commitIndex + 1].LogTerm == args.Term {
+					local_commitIndex++
 				} else {
 					break
 				}
 			}
 
-			if args.LeaderCommit < commitIndex {
-				commitIndex = args.LeaderCommit
+			global_commitIndex := rf.logIndex_local2global(local_commitIndex)
+			if args.LeaderCommit < global_commitIndex {
+				global_commitIndex = args.LeaderCommit
 			}
-			
-			if rf.commitIndex < commitIndex {
-				rf.commitIndex = commitIndex
-				
+
+			if rf.commitIndex < global_commitIndex {
+				rf.commitIndex = global_commitIndex
+
 				rf.applyCond.L.Lock()
 				rf.applyCond.Broadcast()
 				rf.applyCond.L.Unlock()
@@ -328,31 +334,34 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if needPersist {
 				rf.persist()
 			}
-			
+
 			reply.Success = true
-			DPrintf(redFormat+"(AppendEntries handler succeed, len(entries): %v), %v(term: %v) -> %v(commit: %v), len(logs): %v, leaderCommit: %v, args.PrevLogIndex: %v, args.PrevLogTerm: %v"+defaultFormat,
-					len(args.Entries), args.LeaderId, args.Term, rf.me, rf.commitIndex, len(rf.logs), args.LeaderCommit, args.PrevLogIndex, args.PrevLogTerm)
-			return 
+			DPrintf(redFormat+"(AppendEntries handler true, len(entries): %v), %v(term: %v) -> "+
+				"%v(commit: %v, lastLogIndex: %v), leaderCommit: %v, args.PrevLogIndex: %v, args.PrevLogTerm: %v"+defaultFormat,
+				len(args.Entries), args.LeaderId, args.Term, rf.me, rf.commitIndex, 
+				rf.logIndex_local2global(len(rf.logs)-1), args.LeaderCommit, args.PrevLogIndex, args.PrevLogTerm)
+			return
 		}
 
 		// log inconsistency
-		// arr[start:end]: [start, end)
-		if prevLogIndex < len(rf.logs) {
-			DPrintf(redFormat+"(AppendEntries handler inconsistency) %v(prevIndex: %v, prevTerm: %v) -> %v(prevIndex: %v, prevTerm: %v), len(entries): %v"+defaultFormat,
-				args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, rf.me, args.PrevLogIndex, rf.logs[args.PrevLogIndex].LogTerm, len(args.Entries))
-			rf.logs = rf.logs[0:prevLogIndex]
+		if local_args_prevLogIndex < len(rf.logs) {
+			DPrintf(redFormat+"(AppendEntries handler log inconsistency) %v(prevIndex: %v, prevTerm: %v) -> "+
+				"%v(prevIndex: %v, prevTerm: %v), len(entries): %v"+defaultFormat,
+				args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, rf.me, args.PrevLogIndex, 
+				rf.logs[local_args_prevLogIndex].LogTerm, len(args.Entries))
+			rf.logs = rf.logs[0: local_args_prevLogIndex]
 			needPersist = true
 		} else {
-			curPrevLogIndex := len(rf.logs)-1
-			curPrevLogTerm := rf.logs[curPrevLogIndex].LogTerm
-			DPrintf(redFormat+"(AppendEntries handler inconsistency, len not enough) %v(prevIndex: %v, prevTerm: %v) -> %v(lastIndex: %v, lastTerm: %v), len(entries): %v"+defaultFormat,
-				args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, rf.me, curPrevLogIndex, curPrevLogTerm, len(args.Entries))
+			global_lastLogIndex := rf.logIndex_local2global(len(rf.logs) - 1)
+			lastLogTerm := rf.logs[len(rf.logs)-1].LogTerm
+			DPrintf(redFormat+"(AppendEntries handler log inconsistency, len not enough) %v(prevIndex: %v, prevTerm: %v) -> "+
+				"%v(lastIndex: %v, lastTerm: %v), len(entries): %v"+defaultFormat,
+				args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, rf.me, global_lastLogIndex, lastLogTerm, len(args.Entries))
 		}
 
 		if needPersist {
 			rf.persist()
 		}
-
 		reply.Success = false
 	} else {
 		// term outdated
@@ -923,6 +932,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 
 	rf.applyCond.L = new(sync.Mutex)
+
+	rf.initial_logIndexBefore()
 
 	DPrintf(warnFormat+"%v starts"+defaultFormat, rf.me)
 
