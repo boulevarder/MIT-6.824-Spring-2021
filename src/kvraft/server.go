@@ -446,7 +446,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.identifyToStoreState = make(map[string] StoreState)
 
 	kv.clearIdentifyCh = make(chan string, 1)
-
+	DPrintf(warnFormat+"(reboot) role: %v, maxraftstate: %v"+defaultFormat, kv.me, kv.maxraftstate)
 	go kv.clearIdentifyRoutine()
 	go kv.wakeupRoutine()
 	go kv.receiveApplyMsgRoutine()
@@ -466,6 +466,14 @@ func (kv *KVServer) applyCommandToKv(commandInterface interface{}, commandIndex 
 		} else {
 			kv.waitIndexToRand[commandIndex] = -1
 		}
+	}
+
+	if _, isLeader := kv.rf.GetState(); isLeader {
+		DPrintf(blueFormat+"(applyMsg leader) role: %v, commandIndex: %v"+defaultFormat,
+			kv.me, commandIndex)
+	} else {
+		DPrintf(blueFormat+"(applyMsg) role: %v, commandIndex: %v"+defaultFormat,
+			kv.me, commandIndex)
 	}
 
 	if command.Type != GetType {
@@ -528,14 +536,6 @@ func (kv *KVServer) receiveApplyMsgRoutine() {
 		if apply.CommandValid == false {
 			kv.solveSnapshot(&apply)
 			continue
-		}
-
-		if _, isLeader := kv.rf.GetState(); isLeader {
-			DPrintf(blueFormat+"(applyMsg leader) role: %v, commandIndex: %v"+defaultFormat,
-			kv.me, apply.CommandIndex)
-		} else {
-			DPrintf(blueFormat+"(applyMsg) role: %v, commandIndex: %v"+defaultFormat,
-				kv.me, apply.CommandIndex)
 		}
 
 		kv.applyCommandToKv(apply.Command, apply.CommandIndex, apply.CommandTerm)

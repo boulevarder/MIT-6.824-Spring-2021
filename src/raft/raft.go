@@ -33,6 +33,7 @@ var (
 	whiteFormat		string = "\033[37m"
 	blueFormat		string = "\033[1;34m"
 	warnFormat		string = "\033[1;33m"
+	redLightFormat	string = "\033[1;35m"
 	defaultFormat	string = "\033[0m"
 )
 
@@ -296,6 +297,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		
 		local_args_prevLogIndex := rf.logIndex_global2local(args.PrevLogIndex)
+		if local_args_prevLogIndex < 0 {
+			if needPersist {
+				rf.persist()
+			}
+
+			DPrintf(redLightFormat+"(AppendEntries prevLogIndex low) %v(prevLogIndex: %v, prevLogTerm: %v) -> "+
+					"%v(logIndexBefore: %v)"+defaultFormat,
+					args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, rf.me, rf.logIndexBefore)
+			reply.Success = false
+			return 
+		}
+
+
 		if local_args_prevLogIndex < len(rf.logs) && args.PrevLogTerm == rf.logs[local_args_prevLogIndex].LogTerm {
 
 			entryConflict := false
@@ -929,43 +943,44 @@ func (rf *Raft) bgRoutine() {
 
 func (rf *Raft) applyMsgRoutine() {
 	for !rf.killed() {
-		var applySnapshot 	bool
-		var snapshot 		[]byte 
-		var logs 			[]LogType
-
 		rf.mu.Lock()
-
-		local_lastApplied := rf.logIndex_global2local(rf.lastApplied)
-		global_beginApplied := rf.lastApplied + 1
-		lastIncludeIndex := rf.logIndexBefore
-		if local_lastApplied < rf.logIndexBefore {
-			applySnapshot = true
-			snapshot = make([]byte, rf.persister.SnapshotSize())
+		if rf.lastApplied < rf.logIndexBefore {
+			snapshot := make([]byte, rf.persister.SnapshotSize())
 			copy(snapshot, rf.persister.ReadSnapshot())
 			rf.lastApplied = rf.logIndexBefore
-		} else {
-			applySnapshot = false
-			local_commitIndex := rf.logIndex_global2local(rf.commitIndex)
-			for i := local_lastApplied + 1; i <= local_commitIndex; i++ {
-				logs = append(logs, rf.logs[i])
-			}
-			rf.lastApplied = rf.commitIndex
-		}
-		rf.mu.Unlock()
 
-		if applySnapshot {
+			lastIncludeIndex := rf.lastApplied
+			commitIndex := rf.commitIndex
+			lastApplied := rf.lastApplied
+			logIndexBefore := rf.logIndexBefore
+			rf.mu.Unlock()
+			
 			rf.applyCh <- ApplyMsg {
 				CommandValid	: false,
 				Snapshot		: snapshot,
 			}
+
 			if _, isLeader := rf.GetState(); isLeader {
-				DPrintf(whiteFormat+"(applySnapshot leader) role: %v, lastIncludeIndex: %v"+defaultFormat,
-					rf.me, lastIncludeIndex)
+				DPrintf(whiteFormat+"(applySnapshot leader) role: %v, lastIncludeIndex: %v, "+
+					"rf.commitIndex: %v, rf.lastAplied: %v, rf.logIndexBefore: %v"+defaultFormat,
+					rf.me, lastIncludeIndex, commitIndex, lastApplied, logIndexBefore)
 			} else {
-				DPrintf(whiteFormat+"(applySnapshot) role: %v, lastIncludeIndex: %v"+defaultFormat,
-					rf.me, lastIncludeIndex)
-			}
+				DPrintf(whiteFormat+"(applySnapshot) role: %v, lastIncludeIndex: %v, "+
+					"rf.commitIndex: %v, rf.lastAplied: %v, rf.logIndexBefore: %v"+defaultFormat,
+					rf.me, lastIncludeIndex, commitIndex, lastApplied, logIndexBefore)
+			}	
 		} else {
+			logs := []LogType{}
+			local_lastApplied := rf.logIndex_global2local(rf.lastApplied)
+			local_commitIndex := rf.logIndex_global2local(rf.commitIndex)
+			for i := local_lastApplied + 1; i <= local_commitIndex; i++ {
+				logs = append(logs, rf.logs[i])
+			}
+			global_beginApplied := rf.lastApplied + 1
+
+			rf.lastApplied = rf.commitIndex
+			rf.mu.Unlock()
+
 			for index, log := range logs {
 				rf.applyCh <- ApplyMsg {
 					CommandValid	: true,
@@ -973,6 +988,7 @@ func (rf *Raft) applyMsgRoutine() {
 					CommandIndex	: global_beginApplied + index,
 					CommandTerm		: log.LogTerm,
 				}
+
 				if _, isLeader := rf.GetState(); isLeader {
 					DPrintf(whiteFormat+"(applyMsg leader) role: %v, index: %v, command: %v"+defaultFormat,
 						rf.me, global_beginApplied + index, log.Command)

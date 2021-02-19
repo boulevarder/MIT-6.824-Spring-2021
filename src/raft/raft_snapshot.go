@@ -9,7 +9,7 @@ import "log"
 /* discard log entries [1, index)
  * logIndexBefore = index - 1
  * local_index: 日志在logs的索引; global_index: 日志在包含snapshot下的索引
- * logs[local_index]: local_index = 0 ==> global_index = logsIndexBegin + local_index
+ * logs[local_index]: local_index = 0 ==> global_index = logsIndexBefore + local_index
  */
 
 // 安装snapshot的index必须小于lastApplied
@@ -35,7 +35,7 @@ func (rf *Raft) Snapshot(end_index int, maxraftstate int) {
 	if end_index < rf.logIndexBefore {
 		return
 	}
-	if end_index < rf.lastApplied {
+	if end_index > rf.lastApplied {
 		return
 	}
 
@@ -45,11 +45,22 @@ func (rf *Raft) Snapshot(end_index int, maxraftstate int) {
 
 	snapshotLogs := []LogType{}
 	rf.ReadSnapshot(rf.persister.ReadSnapshot(), &snapshotLogs)
-	local_endIndex := rf.logIndex_global2local(end_index)
+	DPrintf(warnFormat+"(Snapshot) role: %v, end_index: %v, len(snapshotLogs): %v, begin"+defaultFormat,
+			rf.me, rf.commitIndex, len(snapshotLogs))
+	if len(snapshotLogs) == 0 {
+		snapshotLogs = append(snapshotLogs, LogType{
+			LogTerm : 0,
+		})
+	}
+
+	local_endIndex := rf.logIndex_global2local(rf.commitIndex)
 	for i := 1; i <= local_endIndex; i++ {
 		snapshotLogs = append(snapshotLogs, rf.logs[i])
 	}
-
+	DPrintf(warnFormat+"(Snapshot) role: %v, end_index: %v, len(snapshotLogs): %v, end"+defaultFormat,
+			rf.me, rf.commitIndex, len(snapshotLogs))
+	DPrintf("snapshotLogs: %v", snapshotLogs)
+	DPrintf("rf.logs: %v", rf.logs)
 	logs := []LogType{}
 	logs = append(logs, LogType{
 		LogTerm	: rf.logs[local_endIndex].LogTerm,
@@ -59,7 +70,7 @@ func (rf *Raft) Snapshot(end_index int, maxraftstate int) {
 		logs = append(logs, rf.logs[i])
 	}
 	rf.logs = logs
-	rf.logIndexBefore = end_index
+	rf.logIndexBefore = rf.commitIndex
 
 	w_snapshot := new(bytes.Buffer)
 	e_snapshot := labgob.NewEncoder(w_snapshot)
@@ -127,7 +138,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	})
 
 	local_lastIncludedIndex := rf.logIndex_global2local(args.LastIncludedIndex)
-	if local_lastIncludedIndex >= 0 {
+	if local_lastIncludedIndex >= 0 && local_lastIncludedIndex < len(rf.logs) {
 		if rf.logs[local_lastIncludedIndex].LogTerm == args.LastIncludedTerm {
 			for i := local_lastIncludedIndex + 1; i < len(rf.logs); i++ {
 				logs = append(logs, rf.logs[i])
