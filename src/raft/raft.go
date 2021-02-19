@@ -61,8 +61,7 @@ func getElectionTimeout() int {
 type ApplyMsg struct {
 	CommandValid 	bool
 	Command      	interface{}
-	CommandIndex 	int
-	CommandTerm	 	int	
+	CommandIndex 	int	
 	Snapshot		[]byte
 }
 
@@ -986,7 +985,6 @@ func (rf *Raft) applyMsgRoutine() {
 					CommandValid	: true,
 					Command			: log.Command,
 					CommandIndex	: global_beginApplied + index,
-					CommandTerm		: log.LogTerm,
 				}
 
 				if _, isLeader := rf.GetState(); isLeader {
