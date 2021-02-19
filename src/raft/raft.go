@@ -887,6 +887,9 @@ func (rf *Raft) sendAppendEntriesToAllPeers() {
 					args.Term = term
 					args.PrevLogIndex = rf.nextIndex[i] - 1
 					local_args_prevLogIndex := rf.logIndex_global2local(args.PrevLogIndex)
+					if local_args_prevLogIndex < 0 {
+						local_args_prevLogIndex = 0
+					}
 					args.PrevLogTerm = rf.logs[local_args_prevLogIndex].LogTerm
 					args.LeaderCommit = rf.commitIndex
 					rf.mu.Unlock()
@@ -1038,7 +1041,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	DPrintf(warnFormat+"%v starts"+defaultFormat, rf.me)
 
 	// initialize from state persisted before a crash
-	rf.readSnapshot(rf.persister.ReadSnapshot(), &rf.logs)
+	rf.ReadSnapshot(rf.persister.ReadSnapshot(), &rf.logs)
 	rf.readPersist(persister.ReadRaftState())
 	
 	go rf.bgRoutine()

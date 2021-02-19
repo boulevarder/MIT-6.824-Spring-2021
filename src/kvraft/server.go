@@ -454,9 +454,79 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	return kv
 }
 
+func (kv *KVServer) applyCommandToKv(commandInterface interface{}, commandIndex int, commandTerm int) {
+	command := commandInterface.(Op)
+	identify := computeIdentify(command.RandNum, command.Key)
+
+	kv.mu.Lock()
+	randNum, existWait := kv.waitIndexToRand[commandIndex]
+	if existWait {
+		if command.RandNum == randNum {
+			kv.waitIndexToRand[commandIndex] = int64(commandTerm)
+		} else {
+			kv.waitIndexToRand[commandIndex] = -1
+		}
+	}
+
+	if command.Type != GetType {
+		storeState, identifyExist := kv.identifyToStoreState[identify]
+		if identifyExist == false || storeState.alreadyCommit == false {
+			switch(command.Type) {
+			case PutType:
+				kv.kvMap[command.Key] = command.Value
+			case AppendType:
+				kv.kvMap[command.Key] += command.Value
+			}
+
+			if identifyExist == false {
+				kv.identifyToStoreState[identify] = StoreState {
+					state			: OtherLeader,
+					alreadyCommit	: true,
+				}
+				kv.clearIdentifyCh <- identify
+			} else {
+				kv.identifyToStoreState[identify] = StoreState {
+					state			: OKState,
+					alreadyCommit	: true,
+				}
+			}
+		}
+	}
+	kv.applyIndex = commandIndex
+
+	for existWait {
+		kv.mu.Unlock()
+
+		kv.informOp()
+		kv.waitOp()
+
+		kv.mu.Lock()
+		_, existWait = kv.waitIndexToRand[commandIndex]
+	}
+	kv.mu.Unlock()
+}
+
+func (kv *KVServer) solveSnapshot(applyMsg *raft.ApplyMsg) {
+	snapShot_log := []raft.LogType{}
+	kv.rf.ReadSnapshot(applyMsg.Snapshot, &snapShot_log)
+
+	kv.mu.Lock()
+	applyIndex := kv.applyIndex
+	if len(snapShot_log) - 1 <= kv.applyIndex {
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+
+	for i := applyIndex; i < len(snapShot_log); i++ {
+		kv.applyCommandToKv(snapShot_log[i].Command, i, snapShot_log[i].LogTerm)
+	}
+}
+
 func (kv *KVServer) receiveApplyMsgRoutine() {
 	for apply := range kv.applyCh {
 		if apply.CommandValid == false {
+			kv.solveSnapshot(&apply)
 			continue
 		}
 
@@ -468,55 +538,7 @@ func (kv *KVServer) receiveApplyMsgRoutine() {
 				kv.me, apply.CommandIndex)
 		}
 
-		command := apply.Command.(Op)
-		identify := computeIdentify(command.RandNum, command.Key)
-
-		kv.mu.Lock()
-		randNum, existWait := kv.waitIndexToRand[apply.CommandIndex]
-		if existWait {
-			if command.RandNum == randNum {
-				kv.waitIndexToRand[apply.CommandIndex] = int64(apply.CommandTerm)
-			} else {
-				kv.waitIndexToRand[apply.CommandIndex] = -1
-			}
-		}
-
-		if command.Type != GetType {
-			storeState, identifyExist := kv.identifyToStoreState[identify]
-			if identifyExist == false || storeState.alreadyCommit == false {
-				switch(command.Type) {
-				case PutType:
-					kv.kvMap[command.Key] = command.Value
-				case AppendType:
-					kv.kvMap[command.Key] += command.Value
-				}
-
-				if identifyExist == false {
-					kv.identifyToStoreState[identify] = StoreState {
-						state			: OtherLeader,
-						alreadyCommit	: true,
-					}
-					kv.clearIdentifyCh <- identify
-				} else {
-					kv.identifyToStoreState[identify] = StoreState {
-						state 			: OKState,
-						alreadyCommit 	: true,
-					}
-				}
-			}
-		}
-		kv.applyIndex = apply.CommandIndex
-
-		for existWait {
-			kv.mu.Unlock()
-
-			kv.informOp()
-			kv.waitOp()
-
-			kv.mu.Lock()
-			_, existWait = kv.waitIndexToRand[apply.CommandIndex]
-		}
-		kv.mu.Unlock()
+		kv.applyCommandToKv(apply.Command, apply.CommandIndex, apply.CommandTerm)
 	}
 }
 
@@ -529,6 +551,10 @@ func (kv *KVServer) wakeupRoutine() {
 			kv.informOp()
 		} else {
 			kv.informApply()
+		}
+
+		if kv.maxraftstate != -1 {
+			kv.rf.Snapshot(kv.applyIndex, kv.maxraftstate)
 		}
 		kv.mu.Unlock()
 	}

@@ -28,7 +28,7 @@ func (rf *Raft) initial_logIndexBefore() {
 }
 
 // snapshot: [0, end_index]
-func (rf *Raft) Snapshot(end_index int) {
+func (rf *Raft) Snapshot(end_index int, maxraftstate int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -39,8 +39,12 @@ func (rf *Raft) Snapshot(end_index int) {
 		return
 	}
 
+	if maxraftstate > rf.persister.RaftStateSize() {
+		return
+	}
+
 	snapshotLogs := []LogType{}
-	rf.readSnapshot(rf.persister.ReadSnapshot(), &snapshotLogs)
+	rf.ReadSnapshot(rf.persister.ReadSnapshot(), &snapshotLogs)
 	local_endIndex := rf.logIndex_global2local(end_index)
 	for i := 1; i <= local_endIndex; i++ {
 		snapshotLogs = append(snapshotLogs, rf.logs[i])
@@ -79,7 +83,7 @@ func (rf *Raft) saveStateAndSnapshot(data_snapshot []byte) {
 }
 
 
-func (rf *Raft) readSnapshot(data []byte, storelogs *[]LogType) {
+func (rf *Raft) ReadSnapshot(data []byte, storelogs *[]LogType) {
 	if data == nil || len(data) < 1 {
 		return
 	}
