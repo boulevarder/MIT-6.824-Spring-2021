@@ -1,15 +1,13 @@
 package kvraft
 
-import "../labrpc"
+import "6.824/labrpc"
 import "crypto/rand"
 import "math/big"
-import "sync"
+
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	leader	int
-	mu 		sync.Mutex
 }
 
 func nrand() int64 {
@@ -41,41 +39,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	randNum := nrand()
-	ck.mu.Lock()
-	server := ck.leader
-	ck.mu.Unlock()
-
-	for {
-		args := GetArgs {
-			Key		: key,
-			RandNum : randNum,
-		}
-		reply := GetReply{}
-		ok := ck.servers[server].Call("KVServer.Get", &args, &reply)
-
-		if ok {
-			switch(reply.Err) {
-			case OK:
-
-				ck.mu.Lock()
-				ck.leader = server
-				ck.mu.Unlock()
-
-				return reply.Value
-			case ErrNoKey:
-				return ""
-			case ErrWrongLeader:
-				server++
-			}
-		} else {
-			server++
-		}
-
-		if server == len(ck.servers) {
-			server = 0
-		}
-	}
+	return ""
 }
 
 //
@@ -90,39 +54,6 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	randNum := nrand()
-	ck.mu.Lock()
-	server := ck.leader
-	ck.mu.Unlock()
-
-	for {
-		args := PutAppendArgs {
-			Key		: key,
-			Value	: value,
-			Op 		: op,
-			RandNum	: randNum,
-		}
-		reply := PutAppendReply{}
-		ok := ck.servers[server].Call("KVServer.PutAppend", &args, &reply)
-
-		if ok {
-			switch(reply.Err) {
-			case OK:
-				ck.mu.Lock()
-				ck.leader = server
-				ck.mu.Unlock()
-				return 
-			case ErrWrongLeader:
-				server++
-			}
-		} else {
-			server++
-		}
-
-		if server == len(ck.servers) {
-			server = 0
-		}
-	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

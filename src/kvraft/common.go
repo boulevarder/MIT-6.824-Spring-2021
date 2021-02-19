@@ -10,13 +10,12 @@ type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key   		string
-	Value 		string
-	Op    		string // "Put" or "Append"
+	Key   string
+	Value string
+	Op    string // "Put" or "Append"
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	RandNum		int64
 }
 
 type PutAppendReply struct {
@@ -24,9 +23,8 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key 		string
+	Key string
 	// You'll have to add definitions here.
-	RandNum		int64
 }
 
 type GetReply struct {
