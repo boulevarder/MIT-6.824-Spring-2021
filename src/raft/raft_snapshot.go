@@ -3,8 +3,7 @@ package raft
 
 import "bytes"
 import "../labgob"
-
-
+import "log"
 
 
 /* discard log entries [1, index)
@@ -13,6 +12,7 @@ import "../labgob"
  * logs[local_index]: local_index = 0 ==> global_index = logsIndexBegin + local_index
  */
 
+// 安装snapshot的index必须小于lastApplied
 
 func (rf *Raft) logIndex_global2local(global_index int) int {
 	return global_index - rf.logIndexBefore
@@ -27,7 +27,59 @@ func (rf *Raft) initial_logIndexBefore() {
 	rf.logIndexBefore = 0
 }
 
-func (rf *Raft) readSnapshot(data []byte, store *[]LogType) {
+// snapshot: [0, end_index]
+func (rf *Raft) Snapshot(end_index int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if end_index < rf.logIndexBefore {
+		return
+	}
+	if end_index < rf.lastApplied {
+		return
+	}
+
+	snapshotLogs := []LogType{}
+	rf.readSnapshot(rf.persister.ReadSnapshot(), &snapshotLogs)
+	local_endIndex := rf.logIndex_global2local(end_index)
+	for i := 1; i <= local_endIndex; i++ {
+		snapshotLogs = append(snapshotLogs, rf.logs[i])
+	}
+
+	logs := []LogType{}
+	logs = append(logs, LogType{
+		LogTerm	: rf.logs[local_endIndex].LogTerm,
+	})
+
+	for i := local_endIndex + 1; i < len(rf.logs); i++ {
+		logs = append(logs, rf.logs[i])
+	}
+	rf.logs = logs
+	rf.logIndexBefore = end_index
+
+	w_snapshot := new(bytes.Buffer)
+	e_snapshot := labgob.NewEncoder(w_snapshot)
+	e_snapshot.Encode(snapshotLogs)
+	data_snapshot := w_snapshot.Bytes()
+	rf.saveStateAndSnapshot(data_snapshot)
+}
+
+
+func (rf *Raft) saveStateAndSnapshot(data_snapshot []byte) {
+	w_persist := new(bytes.Buffer)
+	e_persist := labgob.NewEncoder(w_persist)
+
+	e_persist.Encode(rf.currentTerm)
+	e_persist.Encode(rf.votedFor)
+	e_persist.Encode(rf.logs)
+
+	data_persist := w_persist.Bytes()
+
+	rf.persister.SaveStateAndSnapshot(data_persist, data_snapshot)
+}
+
+
+func (rf *Raft) readSnapshot(data []byte, storelogs *[]LogType) {
 	if data == nil || len(data) < 1 {
 		return
 	}
@@ -37,48 +89,63 @@ func (rf *Raft) readSnapshot(data []byte, store *[]LogType) {
 
 	var logs	[]LogType
 	if d.Decode(&logs) != nil {
-		DPrintf(warnFormat+"====================== (readSnapShot) error ==========================="+defaultFormat)
+		log.Fatalf(warnFormat+"=========================== (readSnapshot) error =============================")
 	} else {
-		*store = logs
+		*storelogs = logs
 	}
 }
 
-func (rf *Raft) saveSnapshot(stateLogs []LogType, snapShotLogs []LogType) {
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
 
-	e.Encode(snapShotLogs)
-
-	data := w.Bytes()
-
-	w2 := new(bytes.Buffer)
-	e2 := labgob.NewEncoder(w2)
-
-	e2.Encode(rf.currentTerm)
-	e2.Encode(rf.votedFor)
-	e2.Encode(stateLogs)
-
-	data2 := w2.Bytes()
-	rf.persister.SaveStateAndSnapshot(data2, data)
+type InstallSnapshotArgs struct {
+	Term				int
+	LeaderId			int
+	LastIncludedIndex	int
+	LastIncludedTerm	int
+	Data				[]byte
 }
 
-func (rf *Raft) createSnapShot(index int) {
-	var snapShotLogs []LogType
-	rf.readSnapshot(rf.persister.ReadSnapshot(), &snapShotLogs)
-	for i := 1; i + rf.logIndexBefore < index; i++ {
-		snapShotLogs = append(snapShotLogs, rf.logs[i])
+type InstallSnapshotReply struct {
+	Term	int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
 	}
-	
-	var replace_logs []LogType
-	replace_logs = append(replace_logs, LogType{
-		LogTerm	: rf.logs[index-1].LogTerm,
+
+	logs := []LogType{}
+	logs = append(logs, LogType {
+		LogTerm	: args.LastIncludedTerm,
 	})
 
-	for i := index; i < len(rf.logs); i++ {
-		replace_logs = append(replace_logs, rf.logs[i])
+	local_lastIncludedIndex := rf.logIndex_global2local(args.LastIncludedIndex)
+	if local_lastIncludedIndex >= 0 {
+		if rf.logs[local_lastIncludedIndex].LogTerm == args.LastIncludedTerm {
+			for i := local_lastIncludedIndex + 1; i < len(rf.logs); i++ {
+				logs = append(logs, rf.logs[i])
+			}
+		}
+	}
+	rf.logs = logs
+	rf.logIndexBefore = args.LastIncludedIndex
+
+	if args.LastIncludedIndex > rf.commitIndex {
+		rf.commitIndex = args.LastIncludedIndex
+
+		rf.applyCond.L.Lock()
+		rf.applyCond.Broadcast()
+		rf.applyCond.L.Unlock()
 	}
 
-	rf.saveSnapshot(replace_logs, snapShotLogs)
-	rf.logs = replace_logs
-	rf.logIndexBefore = index - 1
-} 
+	if rf.currentTerm != args.Term || rf.votedFor != args.LeaderId {
+		rf.currentTerm = args.Term
+		rf.votedFor = args.LeaderId
+
+		rf.persist()
+	}
+	reply.Term = rf.currentTerm
+}
