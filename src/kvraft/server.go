@@ -454,7 +454,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	return kv
 }
 
-func (kv *KVServer) applyCommandToKv(commandInterface interface{}, commandIndex int, commandTerm int) {
+func (kv *KVServer) applyCommandToKv(commandInterface interface{}, commandIndex int) {
 	command := commandInterface.(Op)
 	identify := computeIdentify(command.RandNum, command.Key)
 
@@ -462,7 +462,7 @@ func (kv *KVServer) applyCommandToKv(commandInterface interface{}, commandIndex 
 	randNum, existWait := kv.waitIndexToRand[commandIndex]
 	if existWait {
 		if command.RandNum == randNum {
-			kv.waitIndexToRand[commandIndex] = int64(commandTerm)
+			kv.waitIndexToRand[commandIndex] = 1
 		} else {
 			kv.waitIndexToRand[commandIndex] = -1
 		}
@@ -527,7 +527,7 @@ func (kv *KVServer) solveSnapshot(applyMsg *raft.ApplyMsg) {
 	kv.mu.Unlock()
 
 	for i := applyIndex; i < len(snapShot_log); i++ {
-		kv.applyCommandToKv(snapShot_log[i].Command, i, snapShot_log[i].LogTerm)
+		kv.applyCommandToKv(snapShot_log[i].Command, i)
 	}
 }
 
@@ -538,7 +538,7 @@ func (kv *KVServer) receiveApplyMsgRoutine() {
 			continue
 		}
 
-		kv.applyCommandToKv(apply.Command, apply.CommandIndex, apply.CommandTerm)
+		kv.applyCommandToKv(apply.Command, apply.CommandIndex)
 	}
 }
 
