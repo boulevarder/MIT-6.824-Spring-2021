@@ -794,10 +794,10 @@ func (rf *Raft) sendAppendEntriesToAllPeers() {
 		rf.mu.Lock()
 		if rf.currentTerm != term {
 			rf.mu.Unlock()
-			break
+			return
 		}
 		rf.mu.Unlock()
-		DPrintf("(sendHeartbeats) leader: %v", rf.me)
+		DPrintf("(sendHeartbeats) leader: %v, term: %v", rf.me, term)
 		go func() {
 			for i := 0; i < len(rf.peers); i++ {
 				if i == rf.me {
@@ -807,7 +807,6 @@ func (rf *Raft) sendAppendEntriesToAllPeers() {
 				go func(i int) {
 					args := AppendEntriesArgs{}
 					args.LeaderId = rf.me
-					args.Entries = make([]LogType, 0)
 					rf.mu.Lock()
 					if rf.currentTerm != term {
 						rf.mu.Unlock()
@@ -815,7 +814,8 @@ func (rf *Raft) sendAppendEntriesToAllPeers() {
 					}
 					args.Term = term
 					args.PrevLogIndex = rf.nextIndex[i] - 1
-					args.PrevLogTerm = rf.logs[args.PrevLogIndex].LogTerm
+					local_args_prevLogIndex := rf.logIndex_global2local(args.PrevLogIndex)
+					args.PrevLogTerm = rf.logs[local_args_prevLogIndex].LogTerm
 					args.LeaderCommit = rf.commitIndex
 					rf.mu.Unlock()
 
@@ -857,33 +857,32 @@ func (rf *Raft) applyMsgRoutine() {
 		rf.mu.Lock()
 		logs := []LogType{}
 
-		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+		local_lastApplied := rf.logIndex_global2local(rf.lastApplied)
+		local_commitIndex := rf.logIndex_global2local(rf.commitIndex)
+		for i := local_lastApplied + 1; i <= local_commitIndex; i++ {
 			logs = append(logs, rf.logs[i])
 		}
-		beginApplied := rf.lastApplied + 1
+		global_beginApplied := rf.lastApplied + 1
 
 		rf.lastApplied = rf.commitIndex
 		rf.mu.Unlock()
 
-		
 		for index, log := range logs {
-			rf.applyCh <- ApplyMsg{true, log.Command, beginApplied + index, log.LogTerm}
+			rf.applyCh <- ApplyMsg{
+				CommandValid	: true,
+				Command			: log.Command,
+				CommandIndex	: global_beginApplied + index,
+				CommandTerm		: log.LogTerm,
+			}
 
 			if _, isLeader := rf.GetState(); isLeader {
 				DPrintf(whiteFormat+"(applyMsg leader) role: %v, index: %v, command: %v"+defaultFormat,
-					rf.me, beginApplied + index, log.Command)
+					rf.me, global_beginApplied + index, log.Command)
 			} else {
 				DPrintf(whiteFormat+"(applyMsg) role: %v, index: %v, command: %v"+defaultFormat,
-					rf.me, beginApplied + index, log.Command)
+					rf.me, global_beginApplied + index, log.Command)
 			}
-		} 
-		
-		rf.mu.Lock()
-		if rf.lastApplied != rf.commitIndex {
-			rf.mu.Unlock()
-			continue
 		}
-		rf.mu.Unlock()
 
 		rf.mu.Lock()
 		if rf.lastApplied != rf.commitIndex {
