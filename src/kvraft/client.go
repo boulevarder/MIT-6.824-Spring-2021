@@ -3,11 +3,19 @@ package kvraft
 import "6.824/labrpc"
 import "crypto/rand"
 import "math/big"
+import "sync"
 
+var clerk_lock sync.Mutex
+var clerk_index int
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+
+	mu			sync.Mutex
+	client_id 	int
+	command_id	int
+	leader		int
 }
 
 func nrand() int64 {
@@ -21,6 +29,14 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+
+	clerk_lock.Lock()
+	client_id := clerk_index
+	clerk_index++
+	clerk_lock.Unlock()
+	ck.client_id = client_id
+	ck.command_id = 0
+
 	return ck
 }
 
@@ -39,7 +55,36 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	return ""
+	ck.mu.Lock()
+	server := ck.leader
+	ck.mu.Unlock()
+
+	for {
+		args := GetArgs{
+			Key : key,
+		}
+		reply := GetReply{}
+		ok := ck.servers[server].Call("KVServer.Get", &args, &reply)
+
+		if ok {
+			switch(reply.Err) {
+			case OK:
+				ck.setLeader(server)
+				return reply.Value
+			case ErrNoKey:
+				ck.setLeader(server)
+				return ""
+			case ErrWrongLeader:
+				server++
+			}
+		} else {
+			server++
+		}
+
+		if server == len(ck.servers) {
+			server = 0
+		}
+	}
 }
 
 //
@@ -54,6 +99,39 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	ck.mu.Lock()
+	command_id := ck.command_id
+	ck.command_id++
+	server := ck.leader
+	ck.mu.Unlock()
+
+	for {
+		args := PutAppendArgs {
+			Key		: key,
+			Value	: value,
+			Op		: op,
+			Client_id	: ck.client_id,
+			Command_id	: command_id,
+		}
+		reply := PutAppendReply{}
+		ok := ck.servers[server].Call("KVServer.PutAppend", &args, &reply)
+
+		if ok {
+			switch(reply.Err) {
+			case OK:
+				ck.setLeader(server)
+				return
+			case ErrWrongLeader:
+				server++
+			}
+		} else {
+			server++
+		}
+
+		if server == len(ck.servers) {
+			server = 0
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
@@ -61,4 +139,10 @@ func (ck *Clerk) Put(key string, value string) {
 }
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+
+func (ck *Clerk) setLeader(server int) {
+	ck.mu.Lock()
+	ck.leader = server
+	ck.mu.Unlock()
 }
