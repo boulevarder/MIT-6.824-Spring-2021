@@ -73,7 +73,7 @@ type ApplyMsg struct {
 }
 
 
-type RaftState	int32 
+type RaftState	int
 const (
 	FollowerState	RaftState = 0
 	CandidateState	RaftState = 1
@@ -116,6 +116,7 @@ type Raft struct {
 	applyCond			sync.Cond
 
 	logIndexBefore	int 
+	snapshotApply	bool
 }
 
 // return currentTerm and whether this server
@@ -262,6 +263,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term		int
 	Success		bool
+	LastIncludedIndex	int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -291,6 +293,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			DPrintf(redLightFormat+"(AppendEntries prevLogIndex low) %v(prevLogIndex: %v, prevLogTerm: %v) -> "+
 					"%v(logIndexBefore: %v)"+defaultFormat,
 					args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, rf.me, rf.logIndexBefore)
+			reply.LastIncludedIndex = rf.logIndexBefore
 			reply.Success = false
 			return 
 		}
@@ -372,6 +375,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if needPersist {
 			rf.persist()
 		}
+		reply.LastIncludedIndex = rf.logIndex_local2global(len(rf.logs)-1)
 		reply.Success = false
 	} else {
 		// term outdated
@@ -648,12 +652,18 @@ func (rf *Raft) computeCommitIndex(term int) {
 	}
 }
 
-func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+type AppendEntries_State int
+const (
+	AE_OK		AppendEntries_State = 0
+	AE_REFUSE	AppendEntries_State = 1
+	AE_LOSE		AppendEntries_State = 2
+)
+func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *AppendEntriesReply) AppendEntries_State {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	if rf.currentTerm != args.Term {
-		return false
+		return AE_REFUSE
 	}
 
 	if reply.Success {
@@ -679,7 +689,7 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 		DPrintf("(solveAppendEntriesReply) %v -> %v, len(args.Entries): %v, args.PrevLogIndex: %v, matchIndex: %v",
 			rf.me, i, len(args.Entries), args.PrevLogIndex, rf.matchIndex[i])
 
-		return true
+		return AE_OK
 	} else {
 		if args.Term < reply.Term {
 			DPrintf("(solveAppendEntriesReply term outdated) %v(argsTerm: %v, currentTerm: %v) -> %v(term: %v)",
@@ -693,7 +703,7 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 				rf.persist()
 			}
 		} else {
-			rf.nextIndex[i] = args.PrevLogIndex
+			rf.nextIndex[i] = reply.LastIncludedIndex
 			if rf.nextIndex[i] < rf.matchIndex[i] + 1 {
 				rf.nextIndex[i] = rf.matchIndex[i] + 1
 			}
@@ -701,16 +711,16 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 					"nextIndex: %v, matchIndex: %v", rf.me, i, args.PrevLogIndex, args.PrevLogTerm, 
 					rf.nextIndex[i], rf.matchIndex[i])
 		}
-		return false
+		return AE_REFUSE
 	}
 }
 
-func (rf *Raft) solveInstallSnapshotReply(i int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+func (rf *Raft) solveInstallSnapshotReply(i int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) AppendEntries_State {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	if rf.currentTerm != args.Term {
-		return false
+		return AE_REFUSE
 	}
 
 	if reply.Term == args.Term {
@@ -724,7 +734,7 @@ func (rf *Raft) solveInstallSnapshotReply(i int, args *InstallSnapshotArgs, repl
 
 		DPrintf("(solveInstallSnapshotReply) %v -> %v, LastIncludedIndex: %v, LastIncludedTerm: %v",
 			rf.me, i, args.LastIncludedIndex, args.LastIncludedTerm)
-		return true
+		return AE_OK
 	} else {
 		if rf.currentTerm < reply.Term {
 			rf.currentTerm = reply.Term
@@ -733,12 +743,12 @@ func (rf *Raft) solveInstallSnapshotReply(i int, args *InstallSnapshotArgs, repl
 
 			rf.persist()
 		}
-		return false
+		return AE_REFUSE
 	}
 }
 
 func (rf *Raft) loopSendAppendEntries(i int, term int) {
-	beforeSendSuccess := false
+	beforeAppendEntriesState := AE_REFUSE
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.currentTerm != term || rf.state != LeaderState{
@@ -761,7 +771,7 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 			rf.mu.Unlock()
 
 			rpcTimer := time.NewTimer(time.Millisecond * time.Duration(heartbeatsInterval))
-			informChannel := make(chan bool)
+			informChannel := make(chan AppendEntries_State)
 			go func() {
 				reply := InstallSnapshotReply{}
 				ok := rf.peers[i].Call("Raft.InstallSnapshot", &args, &reply)
@@ -774,9 +784,9 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 			}()
 			
 			select {
-			case beforeSendSuccess =<- informChannel:
+			case beforeAppendEntriesState =<- informChannel:
 			case <- rpcTimer.C:
-				beforeSendSuccess = false
+				beforeAppendEntriesState = AE_LOSE
 			}
 		} else {
 			args := AppendEntriesArgs{}
@@ -802,7 +812,7 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 				}
 				local_sendLogIndexLeft++
 
-				if beforeSendSuccess {
+				if beforeAppendEntriesState == AE_OK {
 					for i := local_sendLogIndexLeft; i < len(rf.logs); i++ {
 						args.Entries = append(args.Entries, rf.logs[i])
 					}
@@ -812,9 +822,11 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 				args.PrevLogIndex = rf.logIndex_local2global(local_sendLogIndexLeft - 1)
 				args.PrevLogTerm = rf.logs[local_sendLogIndexLeft - 1].LogTerm
 
-				rf.nextIndex[i] = args.PrevLogIndex
-				if rf.nextIndex[i] <= rf.matchIndex[i] {
-					rf.nextIndex[i] = rf.matchIndex[i] + 1
+				if beforeAppendEntriesState == AE_REFUSE {
+					rf.nextIndex[i] = args.PrevLogIndex
+					if rf.nextIndex[i] <= rf.matchIndex[i] {
+						rf.nextIndex[i] = rf.matchIndex[i] + 1
+					}
 				}
 			}
 
@@ -824,7 +836,7 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 			rf.mu.Unlock()
 
 			rpcTimer := time.NewTimer(time.Millisecond * time.Duration(heartbeatsInterval))
-			informChannel := make(chan bool)
+			informChannel := make(chan AppendEntries_State)
 			go func() {
 				reply := AppendEntriesReply{}
 				ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
@@ -837,9 +849,9 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 			}()
 
 			select {
-			case beforeSendSuccess =<- informChannel:
+			case beforeAppendEntriesState =<- informChannel:
 			case <- rpcTimer.C:
-				beforeSendSuccess = false
+				beforeAppendEntriesState = AE_LOSE
 			}
 		}
 
@@ -1045,7 +1057,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCond.L = new(sync.Mutex)
 
 	rf.initial_logIndexBefore()
-
+	rf.snapshotApply = false
 	DPrintf(warnFormat+"%v starts"+defaultFormat, rf.me)
 
 	// initialize from state persisted before a crash
@@ -1069,17 +1081,19 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if lastIncludedIndex <= rf.logIndexBefore {
-		return false
-	}
 
-	if lastIncludedIndex == rf.logIndexBefore {
+	if lastIncludedIndex == rf.logIndexBefore && rf.snapshotApply == false {
+		rf.snapshotApply = true
 		rf.lastApplied = lastIncludedIndex
 		DPrintf(redLightFormat+"(CondSnapshot return) role: %v, lastIncludedIndex: %v"+defaultFormat,
 			rf.me, lastIncludedIndex)
 		return true
 	}
 	
+	if lastIncludedIndex < rf.logIndexBefore {
+		return false
+	}
+
 	replace_logs := []LogType{}
 	replace_logs = append(replace_logs, LogType {
 		LogTerm : lastIncludedTerm,
