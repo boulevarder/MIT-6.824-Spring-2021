@@ -49,6 +49,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if rf.currentTerm != args.Term || rf.votedFor != args.LeaderId {
 		rf.currentTerm = args.Term
 		rf.votedFor = args.LeaderId
+		rf.state = FollowerState
 
 		rf.persist()
 	}

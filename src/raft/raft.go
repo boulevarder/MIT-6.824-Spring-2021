@@ -173,6 +173,8 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.votedFor = votedFor
 		rf.logs = logs
 		rf.logIndexBefore = logIndexBefore
+		rf.lastApplied = logIndexBefore
+		rf.commitIndex = logIndexBefore
 	}
 }
 
@@ -948,62 +950,34 @@ func (rf *Raft) bgRoutine() {
 func (rf *Raft) applyMsgRoutine() {
 	for !rf.killed() {
 		rf.mu.Lock()
-		if rf.lastApplied < rf.logIndexBefore {
-			snapshot := make([]byte, rf.persister.SnapshotSize())
-			copy(snapshot, rf.persister.ReadSnapshot())
-			rf.lastApplied = rf.logIndexBefore
+		logs := []LogType{}
+		local_lastApplied := rf.logIndex_global2local(rf.lastApplied)
+		local_commitIndex := rf.logIndex_global2local(rf.commitIndex)
+		for i := local_lastApplied + 1; i <= local_commitIndex; i++ {
+			logs = append(logs, rf.logs[i])
+		}
+		global_beginApplied := rf.lastApplied + 1
 
-			lastIncludeIndex := rf.lastApplied
-			commitIndex := rf.commitIndex
-			lastApplied := rf.lastApplied
-			logIndexBefore := rf.logIndexBefore
-			rf.mu.Unlock()
-			
-			if _, isLeader := rf.GetState(); isLeader {
-				DPrintf(whiteFormat+"(applySnapshot leader) role: %v, lastIncludeIndex: %v, "+
-					"rf.commitIndex: %v, rf.lastAplied: %v, rf.logIndexBefore: %v"+defaultFormat,
-					rf.me, lastIncludeIndex, commitIndex, lastApplied, logIndexBefore)
-			} else {
-				DPrintf(whiteFormat+"(applySnapshot) role: %v, lastIncludeIndex: %v, "+
-					"rf.commitIndex: %v, rf.lastAplied: %v, rf.logIndexBefore: %v"+defaultFormat,
-					rf.me, lastIncludeIndex, commitIndex, lastApplied, logIndexBefore)
-			}	
+		rf.lastApplied = rf.commitIndex
+		rf.mu.Unlock()
 
+		for index, log := range logs {
 			rf.applyCh <- ApplyMsg {
-				CommandValid	: false,
-				Snapshot		: snapshot,
+				CommandValid	: true,
+				Command			: log.Command,
+				CommandIndex	: global_beginApplied + index,
 			}
 
-		} else {
-			logs := []LogType{}
-			local_lastApplied := rf.logIndex_global2local(rf.lastApplied)
-			local_commitIndex := rf.logIndex_global2local(rf.commitIndex)
-			for i := local_lastApplied + 1; i <= local_commitIndex; i++ {
-				logs = append(logs, rf.logs[i])
-			}
-			global_beginApplied := rf.lastApplied + 1
-
-			rf.lastApplied = rf.commitIndex
-			rf.mu.Unlock()
-
-			for index, log := range logs {
-				rf.applyCh <- ApplyMsg {
-					CommandValid	: true,
-					Command			: log.Command,
-					CommandIndex	: global_beginApplied + index,
-				}
-
-				if _, isLeader := rf.GetState(); isLeader {
-					DPrintf(whiteFormat+"(applyMsg leader) role: %v, index: %v, command: %v"+defaultFormat,
-						rf.me, global_beginApplied + index, log.Command)
-				} else {
-					DPrintf(whiteFormat+"(applyMsg) role: %v, index: %v, command: %v"+defaultFormat,
-						rf.me, global_beginApplied + index, log.Command)
-				}
+			if _, isLeader := rf.GetState(); isLeader {
+				DPrintf(whiteFormat+"(applyMsg leader) role: %v, index: %v, command: %v"+defaultFormat,
+					rf.me, global_beginApplied + index, log.Command)
+			} else {
+				DPrintf(whiteFormat+"(applyMsg) role: %v, index: %v, command: %v"+defaultFormat,
+					rf.me, global_beginApplied + index, log.Command)
 			}
 		}
-
 		rf.mu.Lock()
+
 		if rf.lastApplied != rf.commitIndex {
 			rf.mu.Unlock()
 			continue
@@ -1090,7 +1064,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 		return true
 	}
 	
-	if lastIncludedIndex < rf.logIndexBefore {
+	if lastIncludedIndex <= rf.logIndexBefore {
 		return false
 	}
 
@@ -1106,9 +1080,12 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	}
 	rf.logs = replace_logs
 	rf.logIndexBefore = lastIncludedIndex
+	rf.lastApplied = lastIncludedIndex
+	if rf.commitIndex < rf.lastApplied {
+		rf.commitIndex = rf.lastApplied
+	}
 	rf.SaveStateAndSnapshot(snapshot)
 	
-	rf.lastApplied = lastIncludedIndex
 	DPrintf(redLightFormat+"(CondSnapshot) role: %v, lastIncludedIndex: %v"+defaultFormat,
 			rf.me, lastIncludedIndex)
 	return true
@@ -1136,5 +1113,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	}
 	rf.logIndexBefore = index
 	rf.logs = replace_logs
+	rf.lastApplied = index
 	rf.SaveStateAndSnapshot(snapshot)
 }
