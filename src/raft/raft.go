@@ -134,20 +134,13 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.logs)
+	e.Encode(rf.logIndexBefore)
 
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
@@ -161,61 +154,25 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 
 	var currentTerm	int
 	var votedFor	int
 	var logs		[]LogType
+	var logIndexBefore int
 	if d.Decode(&currentTerm) != nil ||
 	   d.Decode(&votedFor) != nil ||
-	   d.Decode(&logs) != nil {
+	   d.Decode(&logs) != nil ||
+	   d.Decode(&logIndexBefore) != nil {
 		log.Fatalf(warnFormat+"====================== (readPersist) error ==========================="+defaultFormat)
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
-		if len(rf.logs) == 1 {
-			rf.logs = logs
-		} else {
-			for i := 1; i < len(logs); i++ {
-				rf.logs = append(rf.logs, logs[i])
-			}
-		}
+		rf.logs = logs
+		rf.logIndexBefore = logIndexBefore
 	}
-}
-
-
-//
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the snapshot on applyCh.
-//
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
-	// Your code here (2D).
-
-	return true
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
 }
 
 
@@ -399,6 +356,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				"%v(prevIndex: %v, prevTerm: %v), len(entries): %v"+defaultFormat,
 				args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, rf.me, args.PrevLogIndex, 
 				rf.logs[local_args_prevLogIndex].LogTerm, len(args.Entries))
+			if local_args_prevLogIndex < 1 {
+				local_args_prevLogIndex = 1
+			}
 			rf.logs = rf.logs[0: local_args_prevLogIndex]
 			needPersist = true
 		} else {
@@ -591,7 +551,7 @@ func (rf *Raft) voteForLeader() {
 							getVote > serverTotal / 2 {
 						rf.state = LeaderState
 						for i := 0; i < serverTotal; i++ {
-							rf.nextIndex[i] = len(rf.logs)
+							rf.nextIndex[i] = rf.logIndex_local2global(len(rf.logs))
 							rf.matchIndex[i] = 0
 						}
 						alreadyInform = true
@@ -826,13 +786,16 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 			args.PrevLogTerm = rf.logs[local_prevLogIndex].LogTerm
 
 			local_matchIndex := rf.logIndex_global2local(rf.matchIndex[i])
+			if local_matchIndex < 0 {
+				local_matchIndex = 0
+			}
 			if local_prevLogIndex + 1 < len(rf.logs) {
 				local_sendLogIndex := local_prevLogIndex + 1
 
 				local_sendLogIndexLeft := local_sendLogIndex
 				for rf.logs[local_sendLogIndexLeft].LogTerm == rf.logs[local_sendLogIndex].LogTerm {
 					local_sendLogIndexLeft--
-
+					DPrintf("local_sendLogIndexLeft: %v, local_sendLogIndex: %v, matchIndex: %v", local_sendLogIndexLeft, local_sendLogIndex, local_matchIndex)
 					if local_sendLogIndexLeft == local_matchIndex {
 						break
 					}
@@ -984,11 +947,6 @@ func (rf *Raft) applyMsgRoutine() {
 			logIndexBefore := rf.logIndexBefore
 			rf.mu.Unlock()
 			
-			rf.applyCh <- ApplyMsg {
-				CommandValid	: false,
-				Snapshot		: snapshot,
-			}
-
 			if _, isLeader := rf.GetState(); isLeader {
 				DPrintf(whiteFormat+"(applySnapshot leader) role: %v, lastIncludeIndex: %v, "+
 					"rf.commitIndex: %v, rf.lastAplied: %v, rf.logIndexBefore: %v"+defaultFormat,
@@ -998,6 +956,12 @@ func (rf *Raft) applyMsgRoutine() {
 					"rf.commitIndex: %v, rf.lastAplied: %v, rf.logIndexBefore: %v"+defaultFormat,
 					rf.me, lastIncludeIndex, commitIndex, lastApplied, logIndexBefore)
 			}	
+
+			rf.applyCh <- ApplyMsg {
+				CommandValid	: false,
+				Snapshot		: snapshot,
+			}
+
 		} else {
 			logs := []LogType{}
 			local_lastApplied := rf.logIndex_global2local(rf.lastApplied)
@@ -1086,6 +1050,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.readSnapshot()
 
 	// start ticker goroutine to start elections
 	go rf.bgRoutine()
@@ -1093,4 +1058,69 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 
 	return rf
+}
+
+//
+// A service wants to switch to snapshot.  Only do so if Raft hasn't
+// have more recent info since it communicate the snapshot on applyCh.
+//
+func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
+
+	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if lastIncludedIndex <= rf.logIndexBefore {
+		return false
+	}
+
+	if lastIncludedIndex == rf.logIndexBefore {
+		rf.lastApplied = lastIncludedIndex
+		DPrintf(redLightFormat+"(CondSnapshot return) role: %v, lastIncludedIndex: %v"+defaultFormat,
+			rf.me, lastIncludedIndex)
+		return true
+	}
+	
+	replace_logs := []LogType{}
+	replace_logs = append(replace_logs, LogType {
+		LogTerm : lastIncludedTerm,
+	})
+	local_lastIncludedIndex := rf.logIndex_global2local(lastIncludedIndex)
+	if local_lastIncludedIndex < len(rf.logs) && rf.logs[local_lastIncludedIndex].LogTerm == lastIncludedTerm {
+		for i := local_lastIncludedIndex + 1; i < len(rf.logs); i++ {
+			replace_logs = append(replace_logs, rf.logs[i])
+		}
+	}
+	rf.logs = replace_logs
+	rf.logIndexBefore = lastIncludedIndex
+	rf.SaveStateAndSnapshot(snapshot)
+	
+	rf.lastApplied = lastIncludedIndex
+	DPrintf(redLightFormat+"(CondSnapshot) role: %v, lastIncludedIndex: %v"+defaultFormat,
+			rf.me, lastIncludedIndex)
+	return true
+}
+
+// the service says it has created a snapshot that has
+// all info up to and including index. this means the
+// service no longer needs the log through (and including)
+// that index. Raft should now trim its log as much as possible.
+func (rf *Raft) Snapshot(index int, snapshot []byte) {
+	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf(redLightFormat+"(Snapshot) role: %v, lastIncludedIndex: %v"+defaultFormat,
+			rf.me, index)
+	local_applyLastIndex := rf.logIndex_global2local(index)
+
+	replace_logs := []LogType{}
+	replace_logs = append(replace_logs, LogType {
+		LogTerm : rf.logs[local_applyLastIndex].LogTerm,
+	})
+
+	for i := local_applyLastIndex + 1; i < len(rf.logs); i++ {
+		replace_logs = append(replace_logs, rf.logs[i])
+	}
+	rf.logIndexBefore = index
+	rf.logs = replace_logs
+	rf.SaveStateAndSnapshot(snapshot)
 }

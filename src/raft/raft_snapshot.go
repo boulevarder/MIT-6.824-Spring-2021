@@ -1,5 +1,9 @@
 package raft
 
+import (
+	"6.824/labgob"
+	"bytes"
+)
 
 /* discard log entries [1, index)
  * logIndexBefore = index - 1
@@ -36,35 +40,10 @@ type InstallSnapshotReply struct {
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	if args.Term < rf.currentTerm {
+		rf.mu.Unlock()
 		reply.Term = rf.currentTerm
 		return
-	}
-
-	logs := []LogType{}
-	logs = append(logs, LogType {
-		LogTerm	: args.LastIncludedTerm,
-	})
-
-	local_lastIncludedIndex := rf.logIndex_global2local(args.LastIncludedIndex)
-	if local_lastIncludedIndex >= 0 && local_lastIncludedIndex < len(rf.logs) {
-		if rf.logs[local_lastIncludedIndex].LogTerm == args.LastIncludedTerm {
-			for i := local_lastIncludedIndex + 1; i < len(rf.logs); i++ {
-				logs = append(logs, rf.logs[i])
-			}
-		}
-	}
-	rf.logs = logs
-	rf.logIndexBefore = args.LastIncludedIndex
-
-	if args.LastIncludedIndex > rf.commitIndex {
-		rf.commitIndex = args.LastIncludedIndex
-
-		rf.applyCond.L.Lock()
-		rf.applyCond.Broadcast()
-		rf.applyCond.L.Unlock()
 	}
 
 	if rf.currentTerm != args.Term || rf.votedFor != args.LeaderId {
@@ -73,5 +52,44 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 		rf.persist()
 	}
+	rf.mu.Unlock()
+	DPrintf(redLightFormat+"(InstallSnapshot handler) %v -> %v, lastIncludedIndex: %v, lastIncludedTerm: %v"+defaultFormat,
+		args.LeaderId, rf.me, args.LastIncludedIndex, args.LastIncludedTerm)
+	rf.applyCh <- ApplyMsg {
+		CommandValid	: false,
+		SnapshotValid	: true,
+		Snapshot		: args.Data,
+		SnapshotTerm	: args.LastIncludedTerm,
+		SnapshotIndex	: args.LastIncludedIndex,
+	}
 	reply.Term = rf.currentTerm
+	return
+}
+
+func (rf *Raft) SaveStateAndSnapshot(snapshot []byte) {
+	w_persist := new(bytes.Buffer)
+	e_persist := labgob.NewEncoder(w_persist)
+
+	e_persist.Encode(rf.currentTerm)
+	e_persist.Encode(rf.votedFor)
+	e_persist.Encode(rf.logs)
+	e_persist.Encode(rf.logIndexBefore)
+
+	data_persist := w_persist.Bytes()
+	rf.persister.SaveStateAndSnapshot(data_persist, snapshot)
+} 
+
+func (rf *Raft) readSnapshot() {
+	data_snapshot := rf.persister.ReadSnapshot()
+	if data_snapshot == nil || len(data_snapshot) < 1 {
+		return
+	}
+
+	rf.applyCh <- ApplyMsg {
+		CommandValid	: false,
+		SnapshotValid	: true,
+		Snapshot		: data_snapshot,
+		SnapshotTerm	: rf.logs[0].LogTerm,
+		SnapshotIndex	: rf.logIndexBefore,
+	}
 }
