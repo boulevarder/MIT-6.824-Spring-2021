@@ -41,8 +41,8 @@ type InstallSnapshotReply struct {
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	if args.Term < rf.currentTerm {
-		rf.mu.Unlock()
 		reply.Term = rf.currentTerm
+		rf.mu.Unlock()
 		return
 	}
 
@@ -53,9 +53,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 		rf.persist()
 	}
-	rf.mu.Unlock()
+	reply.Term = rf.currentTerm
 	DPrintf(redLightFormat+"(InstallSnapshot handler) %v -> %v, lastIncludedIndex: %v, lastIncludedTerm: %v"+defaultFormat,
 		args.LeaderId, rf.me, args.LastIncludedIndex, args.LastIncludedTerm)
+	rf.mu.Unlock()
 	rf.applyCh <- ApplyMsg {
 		CommandValid	: false,
 		SnapshotValid	: true,
@@ -63,7 +64,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotTerm	: args.LastIncludedTerm,
 		SnapshotIndex	: args.LastIncludedIndex,
 	}
-	reply.Term = rf.currentTerm
 	return
 }
 

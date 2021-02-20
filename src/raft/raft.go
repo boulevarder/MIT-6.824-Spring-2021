@@ -962,12 +962,6 @@ func (rf *Raft) applyMsgRoutine() {
 		rf.mu.Unlock()
 
 		for index, log := range logs {
-			rf.applyCh <- ApplyMsg {
-				CommandValid	: true,
-				Command			: log.Command,
-				CommandIndex	: global_beginApplied + index,
-			}
-
 			if _, isLeader := rf.GetState(); isLeader {
 				DPrintf(whiteFormat+"(applyMsg leader) role: %v, index: %v, command: %v"+defaultFormat,
 					rf.me, global_beginApplied + index, log.Command)
@@ -975,9 +969,15 @@ func (rf *Raft) applyMsgRoutine() {
 				DPrintf(whiteFormat+"(applyMsg) role: %v, index: %v, command: %v"+defaultFormat,
 					rf.me, global_beginApplied + index, log.Command)
 			}
-		}
-		rf.mu.Lock()
 
+			rf.applyCh <- ApplyMsg {
+				CommandValid	: true,
+				Command			: log.Command,
+				CommandIndex	: global_beginApplied + index,
+			}
+		}
+
+		rf.mu.Lock()
 		if rf.lastApplied != rf.commitIndex {
 			rf.mu.Unlock()
 			continue
@@ -1056,7 +1056,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if lastIncludedIndex == rf.logIndexBefore && rf.snapshotApply == false {
+	if lastIncludedIndex == rf.lastApplied && rf.snapshotApply == false {
 		rf.snapshotApply = true
 		rf.lastApplied = lastIncludedIndex
 		DPrintf(redLightFormat+"(CondSnapshot return) role: %v, lastIncludedIndex: %v"+defaultFormat,
@@ -1064,7 +1064,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 		return true
 	}
 	
-	if lastIncludedIndex <= rf.logIndexBefore {
+	if lastIncludedIndex <= rf.lastApplied {
 		return false
 	}
 
