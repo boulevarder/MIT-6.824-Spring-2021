@@ -35,7 +35,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	clerk_index++
 	clerk_lock.Unlock()
 	ck.client_id = client_id
-	ck.command_id = 0
+	ck.command_id = 1
 
 	return ck
 }
@@ -56,12 +56,16 @@ func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
 	ck.mu.Lock()
+	command_id := ck.command_id
+	ck.command_id++
 	server := ck.leader
 	ck.mu.Unlock()
 
 	for {
 		args := GetArgs{
 			Key : key,
+			Client_id : ck.client_id,
+			Command_id : command_id,
 		}
 		reply := GetReply{}
 		ok := ck.servers[server].Call("KVServer.Get", &args, &reply)

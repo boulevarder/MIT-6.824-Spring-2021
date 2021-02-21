@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 
 	"time"
-	"bytes"
 )
 
 const Debug = false
@@ -39,16 +38,16 @@ type Op struct {
 	Command_id	int
 }
 
-type CommandMark struct {
-	Client_id	int
-	Command_id	int
+type ValueState struct {
+	value	string
+	exist	bool
 }
 
-type CommandState bool
-const (
-	Apply		CommandState = true
-	NotApply	CommandState = false
-)
+type OpState struct {
+	client_id	int
+	command_id	int
+	valueCh		chan ValueState
+}
 
 type KVServer struct {
 	mu      sync.Mutex
@@ -60,232 +59,116 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	kvMap					map[string] string
-	clientMinCommand		map[int] int
-	clientCommandIdState	map[int] map[int] CommandState
-
-	lastApplied		int
-
-	waitApplyCond	sync.Cond
-	informApplyCond	sync.Cond
-
-	waitIndexToMark	map[int] CommandMark
+	kvMap				map[string] string
+	clientLastCommand	map[int] int
+	indexToOpState		map[int] OpState
 }
 
-func (kv *KVServer) sendGetOp(command Op) (Err, string) {
-	kv.mu.Lock()
-	index, startTerm, isLeader := kv.rf.Start(command)
+func (kv *KVServer) sendToRaft(op Op) (Err, string) {
+	index, startTerm, isLeader := kv.rf.Start(op)
 	if !isLeader {
-		kv.mu.Unlock()
 		return ErrWrongLeader, ""
 	}
-	kv.waitIndexToMark[index] = CommandMark {
-		Client_id	: 1,
-		Command_id	: 1,
+
+	kv.mu.Lock()
+	client_id := op.Client_id
+	command_id := op.Command_id
+	valueCh := make(chan ValueState)
+	
+	kv.indexToOpState[index] = OpState {
+		client_id	: client_id,
+		command_id	: command_id,
+		valueCh		: valueCh,
 	}
 	kv.mu.Unlock()
+	DPrintf(blueFormat+"role: %v, command: %v, type: %v, command_id: %v"+defaultFormat, kv.me, op, op.Type, command_id)
 
-	DPrintf(redFormat + "(solveGetOp begin) role: %v, type: %v, index: %v, term: %v, command: %v"+defaultFormat,
-			kv.me, command.Type, index, startTerm, command)
+	informCh := make(chan bool)
+
 	go func() {
 		for !kv.killed() {
-			time.Sleep(time.Millisecond * time.Duration(100))
+			time.Sleep(100 * time.Millisecond)
 
 			kv.mu.Lock()
-			mark, exist := kv.waitIndexToMark[index]
-
+			_, exist := kv.indexToOpState[index]
 			if !exist {
 				kv.mu.Unlock()
 				return
 			}
 
-			if kv.lastApplied == index || mark.Client_id == -1 {
+			raftTerm, _ := kv.rf.GetState()
+			if raftTerm != startTerm {
+				opstate := kv.indexToOpState[index]
+				opstate.client_id = -1
+				kv.indexToOpState[index] = opstate
 				kv.mu.Unlock()
-				kv.informOp()
-				continue
+				close(informCh)
+				return
 			}
-
-
-			if kv.lastApplied < index {
-				raftTerm, _ := kv.rf.GetState()
-
-				if raftTerm != startTerm {
-					kv.waitIndexToMark[index] = CommandMark {
-						Client_id : -1,
-					}
-					DPrintf(whiteFormat+"(solveGetOp term outdated) role: %v, index: %v"+defaultFormat,
-						kv.me, index)
-					kv.mu.Unlock()
-					kv.informOp()
-					continue
+			if command_id <= kv.clientLastCommand[client_id] {
+				if op.Type == GetType {
+					opstate := kv.indexToOpState[index]
+					opstate.client_id = -1
+					kv.indexToOpState[index] = opstate
 				}
+				kv.mu.Unlock()
+				close(informCh)
+				return
 			}
 			kv.mu.Unlock()
 		}
 	}()
 
 	for !kv.killed() {
-		kv.waitApply()
+		var res ValueState
+		select {
+		case <-informCh:
+		case res =<-valueCh:
+		}
 
 		kv.mu.Lock()
-		if kv.waitIndexToMark[index].Client_id == -1 {
-			delete(kv.waitIndexToMark, index)
-			kv.mu.Unlock()
-			kv.informApply()
-			return ErrWrongLeader, ""
-		}
-
-		if kv.lastApplied < index {
-			kv.mu.Unlock()
-			kv.informApply()
-			continue
-		}
-
-		if kv.lastApplied == index {
-			delete(kv.waitIndexToMark, index)
-			value, exist := kv.kvMap[command.Key]
-			kv.mu.Unlock()
-			kv.informApply()
-			if exist {
-				return OK, value
+		if command_id <= kv.clientLastCommand[client_id] {
+			if op.Type != GetType {
+				delete(kv.indexToOpState, index)
+				kv.mu.Unlock()
+				DPrintf(blueFormat+"role: %v, command: %v, type: %v, ok"+defaultFormat, kv.me, op, op.Type)
+				return OK, ""
 			} else {
-				return ErrNoKey, ""
+				if kv.indexToOpState[index].client_id != -1 {
+					delete(kv.indexToOpState, index)
+					kv.mu.Unlock()
+					if res.exist == true {
+						return OK, res.value
+					} else {
+					DPrintf(blueFormat+"role: %v, command: %v, type: %v, errnokey"+defaultFormat, kv.me, op, op.Type)
+						return ErrNoKey, ""
+					}
+				}
 			}
+		}
+
+		if kv.indexToOpState[index].client_id == -1 {
+			delete(kv.indexToOpState, index)
+			kv.mu.Unlock()
+			DPrintf(blueFormat+"role: %v, command: %v, type: %v, errwrongleader"+defaultFormat, kv.me, op, op.Type)
+			return ErrWrongLeader, ""
 		}
 		kv.mu.Unlock()
 	}
 	return ErrWrongLeader, ""
-	
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	command := Op {
-		Key		: args.Key,
+		Key			: args.Key,
+		Client_id 	: args.Client_id,
+		Command_id	: args.Command_id,
 	}
 
-	err, value := kv.sendGetOp(command)
+	err, value := kv.sendToRaft(command)
 	reply.Err = err
 	reply.Value = value
-}
-
-func (kv *KVServer) waitPutAppendResult(client_id int, command_id int) Err {
-	for !kv.killed() {
-		kv.mu.Lock()
-		state, exist := kv.clientCommandIdState[client_id][command_id]
-		kv.mu.Unlock()
-
-		if exist {
-			if state == Apply {
-				return OK
-			} else {
-				kv.waitApply()
-				continue
-			}
-		} else {
-			return ErrWrongLeader
-		}
-	}
-	return ErrWrongLeader
-}
-
-func (kv *KVServer) sendPutAppendOp(command Op) Err {
-	index, startTerm, isLeader := kv.rf.Start(command)
-	if !isLeader {
-		kv.mu.Unlock()
-		return ErrWrongLeader
-	}
-
-	client_id := command.Client_id
-	command_id := command.Command_id
-	kv.clientCommandIdState[client_id][command_id] = NotApply
-	kv.waitIndexToMark[index] = CommandMark {
-		Client_id	: client_id,
-		Command_id	: command_id,
-	}
-	kv.mu.Unlock()
-
-	DPrintf(redFormat + "(solvePutAppendOp begin) role: %v, type: %v, index: %v, term: %v, command: %v"+defaultFormat,
-			kv.me, command.Type, index, startTerm, command)
-
-	go func() {
-		for !kv.killed() {
-			time.Sleep(time.Millisecond * time.Duration(100))
-			
-			kv.mu.Lock()
-			_, exist := kv.waitIndexToMark[index]
-			state, commandExist := kv.clientCommandIdState[client_id][command_id]
-			if !exist {
-				kv.mu.Unlock()
-				return
-			}
-
-			if kv.lastApplied == index || (commandExist && state == Apply) ||
-					kv.waitIndexToMark[index].Client_id == -1 {
-				kv.mu.Unlock()
-				
-				kv.informOp()
-				continue
-			}
-
-			if kv.lastApplied < index {
-				raftTerm, _ := kv.rf.GetState()
-				if raftTerm != startTerm {
-					kv.waitIndexToMark[index] = CommandMark {
-						Client_id : -1,
-					}
-					kv.mu.Unlock()
-					DPrintf(whiteFormat+"(solvePutAppend term outdated) role: %v, index: %v"+defaultFormat,
-						kv.me, index)
-					kv.informOp()
-					continue
-				}
-			}
-			kv.mu.Unlock()
-		}
-	}()
-
-	for !kv.killed() {
-		kv.waitApply()
-
-		kv.mu.Lock()
-		if kv.waitIndexToMark[index].Client_id == -1 {
-			delete(kv.waitIndexToMark, index)
-
-			state, exist := kv.clientCommandIdState[client_id][command_id]
-			if exist && state == NotApply {
-				delete(kv.clientCommandIdState[client_id], command_id)
-			}
-
-			kv.mu.Unlock()
-			kv.informApply()
-			return ErrWrongLeader
-		}
-
-		state, exist := kv.clientCommandIdState[client_id][command_id]
-		if exist && state == Apply {
-			delete(kv.waitIndexToMark, index)
-			kv.mu.Unlock()
-
-			return OK
-		}
-
-		if kv.lastApplied < index {
-			kv.mu.Unlock()
-			kv.informApply()
-			continue
-		}
-
-		if kv.lastApplied == index {
-			delete(kv.waitIndexToMark, index)
-			
-			kv.mu.Unlock()
-			kv.informApply()
-			return OK
-		}
-		kv.mu.Unlock()
-	}
-	return ErrWrongLeader
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -302,18 +185,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	case "Append":
 		command.Type = AppendType
 	}
-
-	kv.mu.Lock()
-	client_id := command.Client_id
-	command_id := command.Command_id
-	kv.createClientInfo(client_id, command_id)
-	_, exist := kv.clientCommandIdState[client_id][command_id]
-	if exist {
-		kv.mu.Unlock()
-		reply.Err = kv.waitPutAppendResult(client_id, command_id)
-	} else {
-		reply.Err = kv.sendPutAppendOp(command)
-	}
+	err, _ := kv.sendToRaft(command)
+	reply.Err = err
 }
 
 //
@@ -367,99 +240,61 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.kvMap = make(map[string] string)
-	kv.clientMinCommand = make(map[int] int)
-	kv.clientCommandIdState = make(map[int] map[int]CommandState)
+	kv.clientLastCommand = make(map[int] int)
+	kv.indexToOpState = make(map[int] OpState)
 
-	kv.lastApplied = 0
-	kv.waitApplyCond.L = new(sync.Mutex)
-	kv.informApplyCond.L = new(sync.Mutex)
-	kv.waitIndexToMark = make(map[int] CommandMark)
-
-	go kv.wakeupRoutine()
 	go kv.receiveApplyMsgRoutine()
 	return kv
 }
 
 func (kv *KVServer) applySnapshot(apply *raft.ApplyMsg) {
-	if kv.rf.CondInstallSnapshot(apply.SnapshotTerm, apply.SnapshotIndex, apply.Snapshot) {
-		kv.mu.Lock()
-		kv.readSnapshot(apply.Snapshot)
-		kv.lastApplied = apply.SnapshotIndex
-		kv.mu.Unlock()
-	}
 }
 
-func (kv *KVServer) createClientInfo(client_id int, command_id int) {
-	min_command, client_exist := kv.clientMinCommand[client_id]
-	if client_exist == false {
-		kv.clientMinCommand[client_id] = command_id
-		kv.clientCommandIdState[client_id] = make(map[int] CommandState)
-		min_command = command_id
+func (kv *KVServer) judgeAlreadyApply(client_id int, command_id int) bool {
+	lastCommand_id, exist := kv.clientLastCommand[client_id]
+	if !exist || lastCommand_id < command_id {
+		kv.clientLastCommand[client_id] = command_id
+		return true
 	}
-
-	if command_id - min_command > 10 {
-		for i := min_command; i < command_id - 10; i++ {
-			delete(kv.clientCommandIdState[client_id], i)
-		}
-		kv.clientMinCommand[client_id] = command_id - 10
-	}
+	return false
 }
 
 func (kv *KVServer) applyCommand(apply *raft.ApplyMsg) {
 	kv.mu.Lock()
-	if apply.CommandIndex <= kv.lastApplied {
+	op := apply.Command.(Op)
+	client_id := op.Client_id
+	command_id := op.Command_id
+	if kv.judgeAlreadyApply(client_id, command_id) == false && op.Type != GetType {
 		kv.mu.Unlock()
 		return
 	}
-
-	command := apply.Command.(Op)
-
-	if _, isLeader := kv.rf.GetState(); isLeader {
-		DPrintf(blueFormat+"(applyMsg leader) role: %v, commandIndex: %v"+defaultFormat,
-			kv.me, apply.CommandIndex)
-	} else {
-		DPrintf(blueFormat+"(applyMsg) role: %v, commandIndex: %v"+defaultFormat,
-			kv.me, apply.CommandIndex)
+	var value string
+	var exist bool
+	switch(op.Type) {
+	case PutType:
+		kv.kvMap[op.Key] = op.Value
+	case AppendType:
+		kv.kvMap[op.Key] += op.Value
+	case GetType:
+		value, exist = kv.kvMap[op.Key]
 	}
 
-	commandIndex := apply.CommandIndex
-	client_id := command.Client_id
-	command_id := command.Command_id
-	if command.Type != GetType {
-		kv.createClientInfo(client_id, command_id)
-	
-		state, exist := kv.clientCommandIdState[client_id][command_id]
-		if !exist || state == NotApply {
-			kv.clientCommandIdState[client_id][command_id] = Apply
-
-			switch(command.Type) {
-			case PutType:
-				kv.kvMap[command.Key] = command.Value
-			case AppendType:
-				kv.kvMap[command.Key] += command.Value
-			}
+	opstate, exist := kv.indexToOpState[apply.CommandIndex]
+	if !exist || opstate.client_id != client_id || opstate.command_id != command_id {
+		if exist {
+			opstate := kv.indexToOpState[apply.CommandIndex]
+			opstate.client_id = -1
+			kv.indexToOpState[apply.CommandIndex] = opstate
+			close(opstate.valueCh)
 		}
-	}
-	kv.lastApplied = commandIndex
-
-	commandMark, existWaitOp := kv.waitIndexToMark[commandIndex]
-
-	if existWaitOp && (commandMark.Client_id != client_id ||
-			commandMark.Command_id != command_id) {
-		commandMark.Client_id = -1
-	}
-
-	for existWaitOp && commandMark.Client_id == client_id && 
-			commandMark.Command_id == command_id {
 		kv.mu.Unlock()
-
-		kv.informOp()
-		kv.waitOp()
-
-		kv.mu.Lock()
-		commandMark, existWaitOp = kv.waitIndexToMark[commandIndex]
+		return
 	}
 	kv.mu.Unlock()
+	opstate.valueCh <- ValueState {
+		value	: value,
+		exist	: exist,
+	}
 }
 
 func (kv *KVServer) receiveApplyMsgRoutine() {
@@ -473,64 +308,5 @@ func (kv *KVServer) receiveApplyMsgRoutine() {
 		} else if apply.CommandValid {
 			kv.applyCommand(&apply)
 		}
-	}
-}
-
-func (kv *KVServer) wakeupRoutine() {
-	for !kv.killed() {
-		time.Sleep(time.Millisecond * time.Duration(50))
-		kv.mu.Lock()
-		if _, exist := kv.waitIndexToMark[kv.lastApplied]; exist {
-			kv.informOp()
-		} else {
-			kv.informApply()
-		}
-		kv.mu.Unlock()
-	}
-}
-
-func (kv *KVServer) informApply() {
-	kv.informApplyCond.L.Lock()
-	kv.informApplyCond.Broadcast()
-	kv.informApplyCond.L.Unlock()
-}
-
-func (kv *KVServer) waitApply() {
-	kv.waitApplyCond.L.Lock()
-	kv.waitApplyCond.Wait()
-	kv.waitApplyCond.L.Unlock()
-}
-
-func (kv *KVServer) informOp() {
-	kv.waitApplyCond.L.Lock()
-	kv.waitApplyCond.Broadcast()
-	kv.waitApplyCond.L.Unlock()
-}
-
-func (kv *KVServer) waitOp() {
-	kv.informApplyCond.L.Lock()
-	kv.informApplyCond.Wait()
-	kv.informApplyCond.L.Unlock()
-}
-
-func (kv *KVServer) readSnapshot(snapshot []byte) {
-	if snapshot == nil || len(snapshot) < 1 {
-		return
-	}
-
-	r := bytes.NewBuffer(snapshot)
-	d := labgob.NewDecoder(r)
-
-	var kvMap			map[string] string
-	var clientMinCommand map[int] int
-	var clientCommandIdState map[int] map[int]CommandState
-	if d.Decode(&kvMap) != nil || 
-		d.Decode(&clientMinCommand) != nil ||
-		d.Decode(&clientCommandIdState) != nil {
-		log.Fatalf("======================== (readSnapshot) error =========================")
-	} else {
-		kv.kvMap = kvMap
-		kv.clientMinCommand = clientMinCommand
-		kv.clientCommandIdState = clientCommandIdState
 	}
 }
