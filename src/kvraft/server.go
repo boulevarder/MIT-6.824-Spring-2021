@@ -317,7 +317,7 @@ func (kv *KVServer) receiveApplyMsgRoutine() {
 			kv.applySnapshot(&apply)
 		} else if apply.CommandValid {
 			kv.applyCommand(&apply)
-			if kv.persister.RaftStateSize() > kv.maxraftstate {
+			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() > kv.maxraftstate {
 				kv.mu.Lock()
 				snapshot := kv.snapshot()
 				index := apply.CommandIndex
