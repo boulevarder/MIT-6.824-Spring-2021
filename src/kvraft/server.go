@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"time"
+	"bytes"
 )
 
 const Debug = false
@@ -62,6 +63,8 @@ type KVServer struct {
 	kvMap				map[string] string
 	clientLastCommand	map[int] int
 	indexToOpState		map[int] OpState
+
+	persister			*raft.Persister
 }
 
 func (kv *KVServer) sendToRaft(op Op) (Err, string) {
@@ -243,11 +246,18 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.clientLastCommand = make(map[int] int)
 	kv.indexToOpState = make(map[int] OpState)
 
+	kv.persister = persister
+
 	go kv.receiveApplyMsgRoutine()
 	return kv
 }
 
 func (kv *KVServer) applySnapshot(apply *raft.ApplyMsg) {
+	if kv.rf.CondInstallSnapshot(apply.SnapshotTerm, apply.SnapshotIndex, apply.Snapshot) {
+		kv.mu.Lock()
+		kv.readSnapshot(apply.Snapshot)
+		kv.mu.Unlock()
+	}
 }
 
 func (kv *KVServer) judgeAlreadyApply(client_id int, command_id int) bool {
@@ -307,6 +317,44 @@ func (kv *KVServer) receiveApplyMsgRoutine() {
 			kv.applySnapshot(&apply)
 		} else if apply.CommandValid {
 			kv.applyCommand(&apply)
+			if kv.persister.RaftStateSize() > kv.maxraftstate {
+				kv.mu.Lock()
+				snapshot := kv.snapshot()
+				index := apply.CommandIndex
+				kv.mu.Unlock()
+				kv.rf.Snapshot(index, snapshot)
+			}
 		}
+	}
+}
+
+
+func (kv *KVServer) snapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(kv.kvMap)
+	e.Encode(kv.clientLastCommand)
+
+	data := w.Bytes()
+	return data
+}
+
+func (kv *KVServer) readSnapshot(snapshot []byte) {
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+
+	var kvMap	map[string] string
+	var clientLastCommand map[int] int
+	if d.Decode(&kvMap) != nil ||
+		d.Decode(&clientLastCommand) != nil {
+		log.Fatalf("error")
+	} else {
+		kv.kvMap = kvMap
+		kv.clientLastCommand = clientLastCommand
 	}
 }
