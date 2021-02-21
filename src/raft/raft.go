@@ -113,10 +113,11 @@ type Raft struct {
 
 	haveMessagePeriod	bool
 	newLogConds			[]*sync.Cond
-	applyCond			sync.Cond
 
 	logIndexBefore	int 
-	snapshotApply	bool
+
+	informApplyCh		chan bool
+	snapshotAlreadyApply	bool
 }
 
 // return currentTerm and whether this server
@@ -271,6 +272,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	DPrintf("argsPrevLogTerm: %v", args.PrevLogTerm)
 
 	if rf.currentTerm <= args.Term {
 		needPersist := false
@@ -338,9 +340,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if rf.commitIndex < global_commitIndex {
 				rf.commitIndex = global_commitIndex
 
-				rf.applyCond.L.Lock()
-				rf.applyCond.Broadcast()
-				rf.applyCond.L.Unlock()
+				go func() {
+					rf.informApplyCh <- true
+				}()
 			}
 
 			if needPersist {
@@ -648,9 +650,9 @@ func (rf *Raft) computeCommitIndex(term int) {
 	if global_updateCommitIndex > rf.commitIndex {
 		rf.commitIndex = global_updateCommitIndex
 
-		rf.applyCond.L.Lock()
-		rf.applyCond.Broadcast()
-		rf.applyCond.L.Unlock()
+		go func() {
+			rf.informApplyCh <- true
+		}()
 	}
 }
 
@@ -705,7 +707,7 @@ func (rf *Raft) solveAppendEntriesReply(i int, args *AppendEntriesArgs, reply *A
 				rf.persist()
 			}
 		} else {
-			rf.nextIndex[i] = reply.LastIncludedIndex
+			rf.nextIndex[i] = reply.LastIncludedIndex + 1
 			if rf.nextIndex[i] < rf.matchIndex[i] + 1 {
 				rf.nextIndex[i] = rf.matchIndex[i] + 1
 			}
@@ -890,17 +892,6 @@ func (rf *Raft) sendAppendEntriesToAllPeers() {
 		rf.mu.Unlock()
 		DPrintf("(sendHeartbeats) leader: %v, term: %v", rf.me, term)
 		go func() {
-		   	rf.mu.Lock()
-			wakeup := false
-			if rf.lastApplied != rf.commitIndex {
-		        wakeup = true
-			}
-			rf.mu.Unlock()
-			if wakeup {
-				rf.applyCond.L.Lock()
-				rf.applyCond.Wait()
-		        rf.applyCond.L.Unlock()
-			}
 			for i := 0; i < len(rf.peers); i++ {
 				if i == rf.me {
 					continue
@@ -957,46 +948,64 @@ func (rf *Raft) bgRoutine() {
 }
 
 
+func (rf *Raft) applyCommand() {
+	logs := []LogType{}
+	local_lastApplied := rf.logIndex_global2local(rf.lastApplied)
+	local_commitIndex := rf.logIndex_global2local(rf.commitIndex)
+	for i := local_lastApplied + 1; i <= local_commitIndex; i++ {
+		logs = append(logs, rf.logs[i])
+	}
+	global_beginApplied := rf.lastApplied + 1
+
+	rf.lastApplied = rf.commitIndex
+	rf.mu.Unlock()
+
+	for index, log := range logs {
+		if _, isLeader := rf.GetState(); isLeader {
+			DPrintf(whiteFormat+"(applyMsg leader) role: %v, index: %v, command: %v"+defaultFormat,
+				rf.me, global_beginApplied + index, log.Command)
+		} else {
+			DPrintf(whiteFormat+"(applyMsg) role: %v, index: %v, command: %v"+defaultFormat,
+				rf.me, global_beginApplied + index, log.Command)
+		}
+
+		rf.applyCh <- ApplyMsg {
+			CommandValid	: true,
+			Command			: log.Command,
+			CommandIndex	: global_beginApplied + index,
+		}
+	}
+}
+// 进入Channel
+func (rf *Raft) applySnapshot() {
+	applyMsg := ApplyMsg {
+		CommandValid	: false,
+		SnapshotValid	: true,
+		Snapshot		: rf.persister.ReadSnapshot(),
+		SnapshotTerm	: rf.logs[0].LogTerm,
+		SnapshotIndex	: rf.logIndexBefore,
+	}
+	DPrintf(whiteFormat+"(applySnapshot) role: %v, lastIncludedIndex: %v"+defaultFormat,
+				rf.me, applyMsg.SnapshotIndex)
+	rf.snapshotAlreadyApply = true
+	rf.mu.Unlock()	
+	rf.applyCh <- applyMsg
+}
+
 func (rf *Raft) applyMsgRoutine() {
+	rf.mu.Lock()
+	rf.readSnapshot()
+	rf.mu.Unlock()
 	for !rf.killed() {
-		rf.mu.Lock()
-		logs := []LogType{}
-		local_lastApplied := rf.logIndex_global2local(rf.lastApplied)
-		local_commitIndex := rf.logIndex_global2local(rf.commitIndex)
-		for i := local_lastApplied + 1; i <= local_commitIndex; i++ {
-			logs = append(logs, rf.logs[i])
-		}
-		global_beginApplied := rf.lastApplied + 1
-
-		rf.lastApplied = rf.commitIndex
-		rf.mu.Unlock()
-
-		for index, log := range logs {
-			if _, isLeader := rf.GetState(); isLeader {
-				DPrintf(whiteFormat+"(applyMsg leader) role: %v, index: %v, command: %v"+defaultFormat,
-					rf.me, global_beginApplied + index, log.Command)
+		select {
+		case <-rf.informApplyCh:
+			rf.mu.Lock()
+			if rf.snapshotAlreadyApply == false {
+				rf.applySnapshot()
 			} else {
-				DPrintf(whiteFormat+"(applyMsg) role: %v, index: %v, command: %v"+defaultFormat,
-					rf.me, global_beginApplied + index, log.Command)
-			}
-
-			rf.applyCh <- ApplyMsg {
-				CommandValid	: true,
-				Command			: log.Command,
-				CommandIndex	: global_beginApplied + index,
+				rf.applyCommand()
 			}
 		}
-
-		rf.mu.Lock()
-		if rf.lastApplied != rf.commitIndex {
-			rf.mu.Unlock()
-			continue
-		}
-		rf.mu.Unlock()
-
-		rf.applyCond.L.Lock()
-		rf.applyCond.Wait()
-		rf.applyCond.L.Unlock()
 	}
 }
 
@@ -1038,16 +1047,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.newLogConds[i] = sync.NewCond(new(sync.Mutex))
 	}
 
-	rf.applyCond.L = new(sync.Mutex)
 
 	rf.initial_logIndexBefore()
-	rf.snapshotApply = false
 	DPrintf(warnFormat+"%v starts"+defaultFormat, rf.me)
+	rf.informApplyCh = make(chan bool)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	rf.readSnapshot()
-
+	
 	// start ticker goroutine to start elections
 	go rf.bgRoutine()
 	go rf.applyMsgRoutine()
@@ -1060,45 +1067,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
 //
+// 只有一样大时才通过
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
-	if lastIncludedIndex == rf.lastApplied && rf.snapshotApply == false {
-		rf.snapshotApply = true
-		rf.lastApplied = lastIncludedIndex
-		DPrintf(redLightFormat+"(CondSnapshot return) role: %v, lastIncludedIndex: %v"+defaultFormat,
+	if lastIncludedIndex == rf.logIndexBefore {
+		DPrintf(blueFormat+"(CondSnapshot) role: %v, lastIncludedIndex: %v"+defaultFormat,
 			rf.me, lastIncludedIndex)
 		return true
 	}
-	
-	if lastIncludedIndex <= rf.lastApplied {
-		return false
-	}
-
-	replace_logs := []LogType{}
-	replace_logs = append(replace_logs, LogType {
-		LogTerm : lastIncludedTerm,
-	})
-	local_lastIncludedIndex := rf.logIndex_global2local(lastIncludedIndex)
-	if local_lastIncludedIndex < len(rf.logs) && rf.logs[local_lastIncludedIndex].LogTerm == lastIncludedTerm {
-		for i := local_lastIncludedIndex + 1; i < len(rf.logs); i++ {
-			replace_logs = append(replace_logs, rf.logs[i])
-		}
-	}
-	rf.logs = replace_logs
-	rf.logIndexBefore = lastIncludedIndex
-	rf.lastApplied = lastIncludedIndex
-	if rf.commitIndex < rf.lastApplied {
-		rf.commitIndex = rf.lastApplied
-	}
-	rf.SaveStateAndSnapshot(snapshot)
-	
-	DPrintf(redLightFormat+"(CondSnapshot) role: %v, lastIncludedIndex: %v"+defaultFormat,
-			rf.me, lastIncludedIndex)
-	return true
+	return false
 }
 
 // the service says it has created a snapshot that has
@@ -1111,18 +1091,23 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	defer rf.mu.Unlock()
 	DPrintf(redLightFormat+"(Snapshot) role: %v, lastIncludedIndex: %v"+defaultFormat,
 			rf.me, index)
-	local_applyLastIndex := rf.logIndex_global2local(index)
 
+	local_lastIncludedIndex := rf.logIndex_global2local(index)
 	replace_logs := []LogType{}
 	replace_logs = append(replace_logs, LogType {
-		LogTerm : rf.logs[local_applyLastIndex].LogTerm,
+		LogTerm : rf.logs[local_lastIncludedIndex].LogTerm,
 	})
 
-	for i := local_applyLastIndex + 1; i < len(rf.logs); i++ {
+	for i := local_lastIncludedIndex + 1; i < len(rf.logs); i++ {
 		replace_logs = append(replace_logs, rf.logs[i])
 	}
-	rf.logIndexBefore = index
+	
 	rf.logs = replace_logs
-	rf.lastApplied = index
+	rf.logIndexBefore = index
+	rf.lastApplied = rf.logIndexBefore
+	if rf.commitIndex < rf.lastApplied {
+		rf.commitIndex = rf.lastApplied
+	}
 	rf.SaveStateAndSnapshot(snapshot)
+	rf.snapshotAlreadyApply = true
 }

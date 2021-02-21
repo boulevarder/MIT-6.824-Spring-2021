@@ -38,33 +38,49 @@ type InstallSnapshotReply struct {
 	Term	int
 }
 
+
+// 更改状态
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
-		rf.mu.Unlock()
 		return
 	}
 
 	if rf.currentTerm != args.Term || rf.votedFor != args.LeaderId {
 		rf.currentTerm = args.Term
 		rf.votedFor = args.LeaderId
-		rf.state = FollowerState
-
 		rf.persist()
 	}
+	rf.state = FollowerState
 	reply.Term = rf.currentTerm
-	DPrintf(redLightFormat+"(InstallSnapshot handler) %v -> %v, lastIncludedIndex: %v, lastIncludedTerm: %v"+defaultFormat,
-		args.LeaderId, rf.me, args.LastIncludedIndex, args.LastIncludedTerm)
-	rf.mu.Unlock()
-	rf.applyCh <- ApplyMsg {
-		CommandValid	: false,
-		SnapshotValid	: true,
-		Snapshot		: args.Data,
-		SnapshotTerm	: args.LastIncludedTerm,
-		SnapshotIndex	: args.LastIncludedIndex,
+
+	if args.LastIncludedIndex <= rf.commitIndex {
+		return
 	}
-	return
+	replace_logs := []LogType{}
+	replace_logs = append(replace_logs, LogType {
+		LogTerm : args.LastIncludedTerm,
+	})
+	local_lastIncludedIndex := rf.logIndex_global2local(args.LastIncludedIndex)
+	if local_lastIncludedIndex < len(rf.logs) && rf.logs[local_lastIncludedIndex].LogTerm == args.LastIncludedTerm {
+		for i := local_lastIncludedIndex + 1; i < len(rf.logs); i++ {
+			replace_logs = append(replace_logs, rf.logs[i])
+		}
+	}
+	rf.logs = replace_logs
+	rf.logIndexBefore = args.LastIncludedIndex
+	rf.lastApplied = rf.logIndexBefore
+	if rf.commitIndex < rf.lastApplied {
+		rf.commitIndex = rf.lastApplied
+	}
+	rf.SaveStateAndSnapshot(args.Data)
+	rf.snapshotAlreadyApply = false
+
+	go func() {
+		rf.informApplyCh <- true
+	}()
 }
 
 func (rf *Raft) SaveStateAndSnapshot(snapshot []byte) {
@@ -81,6 +97,7 @@ func (rf *Raft) SaveStateAndSnapshot(snapshot []byte) {
 } 
 
 func (rf *Raft) readSnapshot() {
+	rf.snapshotAlreadyApply = true
 	data_snapshot := rf.persister.ReadSnapshot()
 	if data_snapshot == nil || len(data_snapshot) < 1 {
 		return
