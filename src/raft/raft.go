@@ -807,7 +807,6 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 				local_sendLogIndexLeft := local_sendLogIndex
 				for rf.logs[local_sendLogIndexLeft].LogTerm == rf.logs[local_sendLogIndex].LogTerm {
 					local_sendLogIndexLeft--
-					DPrintf("local_sendLogIndexLeft: %v, local_sendLogIndex: %v, matchIndex: %v", local_sendLogIndexLeft, local_sendLogIndex, local_matchIndex)
 					if local_sendLogIndexLeft == local_matchIndex {
 						break
 					}
@@ -891,6 +890,17 @@ func (rf *Raft) sendAppendEntriesToAllPeers() {
 		rf.mu.Unlock()
 		DPrintf("(sendHeartbeats) leader: %v, term: %v", rf.me, term)
 		go func() {
+		   	rf.mu.Lock()
+			wakeup := false
+			if rf.lastApplied != rf.commitIndex {
+		        wakeup = true
+			}
+			rf.mu.Unlock()
+			if wakeup {
+				rf.applyCond.L.Lock()
+				rf.applyCond.Wait()
+		        rf.applyCond.L.Unlock()
+			}
 			for i := 0; i < len(rf.peers); i++ {
 				if i == rf.me {
 					continue
