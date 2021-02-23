@@ -81,6 +81,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	go func() {
 		rf.informApplyCh <- true
 	}()
+	DPrintf(blueFormat+"(InstallSnapshot handler) role: %v, lastIncludedIndex: %v"+defaultFormat,
+		rf.me, args.LastIncludedIndex)
 }
 
 func (rf *Raft) SaveStateAndSnapshot(snapshot []byte) {
