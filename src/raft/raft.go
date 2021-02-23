@@ -434,8 +434,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.logs = append(rf.logs, LogType{command, term})
 		rf.persist()
 
-		DPrintf(warnFormat+"(Start) leaderId: %v, start: %v, commitIndex: %v, command: %v"+defaultFormat,
-			rf.me, index, rf.commitIndex, command)
+		DPrintf(warnFormat+"(Start) leaderId: %v, start: %v, commitIndex: %v, command: %v, term: %v"+defaultFormat,
+			rf.me, index, rf.commitIndex, command, term)
 	} else {
 		isLeader = false
 	}
@@ -614,7 +614,6 @@ func (rf *Raft) voteForLeader() {
 
 
 func (rf *Raft) computeCommitIndex(term int) {
-	// 只能commit当前term的日志, 所以传进来term, 防止在两次加锁之间term转换了
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -636,7 +635,7 @@ func (rf *Raft) computeCommitIndex(term int) {
 				continue
 			}
 
-			if rf.matchIndex[j] >= i {
+			if rf.logIndex_global2local(rf.matchIndex[j]) >= i {
 				num++
 			}
 		}
@@ -736,7 +735,7 @@ func (rf *Raft) solveInstallSnapshotReply(i int, args *InstallSnapshotArgs, repl
 			rf.nextIndex[i] = args.LastIncludedIndex + 1
 		}
 
-		DPrintf("(solveInstallSnapshotReply) %v -> %v, LastIncludedIndex: %v, LastIncludedTerm: %v",
+		DPrintf(redLightFormat+"(solveInstallSnapshotReply) %v -> %v, LastIncludedIndex: %v, LastIncludedTerm: %v"+defaultFormat,
 			rf.me, i, args.LastIncludedIndex, args.LastIncludedTerm)
 		return AE_OK
 	} else {
@@ -747,6 +746,8 @@ func (rf *Raft) solveInstallSnapshotReply(i int, args *InstallSnapshotArgs, repl
 
 			rf.persist()
 		}
+		DPrintf(redLightFormat+"(solveInstallSnapshotReply, refuse) %v(currentTerm: %v) -> %v"+defaultFormat,
+			rf.me, rf.currentTerm, i)
 		return AE_REFUSE
 	}
 }
@@ -755,7 +756,7 @@ func (rf *Raft) loopSendAppendEntries(i int, term int) {
 	beforeAppendEntriesState := AE_REFUSE
 	for !rf.killed() {
 		rf.mu.Lock()
-		if rf.currentTerm != term || rf.state != LeaderState{
+		if rf.currentTerm != term || rf.state != LeaderState {
 			rf.mu.Unlock()
 			return
 		}
@@ -948,7 +949,7 @@ func (rf *Raft) bgRoutine() {
 }
 
 
-func (rf *Raft) applyCommand() {
+func (rf *Raft) applyCommand_backup() {
 	logs := []LogType{}
 	local_lastApplied := rf.logIndex_global2local(rf.lastApplied)
 	local_commitIndex := rf.logIndex_global2local(rf.commitIndex)
@@ -976,6 +977,34 @@ func (rf *Raft) applyCommand() {
 		}
 	}
 }
+
+func (rf *Raft) applyCommand() {
+	if rf.lastApplied == rf.commitIndex {
+		rf.mu.Unlock()
+		return
+	}
+
+	local_lastApplied := rf.logIndex_global2local(rf.lastApplied)
+	log := rf.logs[local_lastApplied+1]
+	global_applyIndex := rf.lastApplied + 1
+	rf.lastApplied++
+	rf.mu.Unlock()
+
+	if _, isLeader := rf.GetState(); isLeader {
+		DPrintf(whiteFormat+"(applyMsg leader) role: %v, index: %v, command: %v"+defaultFormat,
+			rf.me, global_applyIndex, log.Command)
+	} else {
+		DPrintf(whiteFormat+"(applyMsg) role: %v, index: %v, command: %v"+defaultFormat,
+			rf.me, global_applyIndex, log.Command)
+	}
+
+	rf.applyCh <- ApplyMsg {
+		CommandValid 	: true,
+		Command			: log.Command,
+		CommandIndex	: global_applyIndex,
+	}
+}
+
 // 进入Channel
 func (rf *Raft) applySnapshot() {
 	applyMsg := ApplyMsg {
@@ -992,7 +1021,7 @@ func (rf *Raft) applySnapshot() {
 	rf.applyCh <- applyMsg
 }
 
-func (rf *Raft) applyMsgRoutine() {
+func (rf *Raft) applyMsgRoutine_backup() {
 	rf.mu.Lock()
 	rf.readSnapshot()
 	rf.mu.Unlock()
@@ -1003,6 +1032,27 @@ func (rf *Raft) applyMsgRoutine() {
 			if rf.snapshotAlreadyApply == false {
 				rf.applySnapshot()
 			} else {
+				rf.applyCommand()
+			}
+		}
+	}
+}
+
+func (rf *Raft) applyMsgRoutine() {
+	rf.mu.Lock()
+	rf.readSnapshot()
+	rf.mu.Unlock()
+	for !rf.killed() {
+		<- rf.informApplyCh
+		for {
+			rf.mu.Lock()
+			if rf.snapshotAlreadyApply == false {
+				rf.applySnapshot()
+			} else {
+				if rf.commitIndex == rf.lastApplied {
+					rf.mu.Unlock()
+					break
+				} 
 				rf.applyCommand()
 			}
 		}
@@ -1091,7 +1141,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	defer rf.mu.Unlock()
 	DPrintf(redLightFormat+"(Snapshot) role: %v, lastIncludedIndex: %v"+defaultFormat,
 			rf.me, index)
-
+	if index <= rf.logIndexBefore {
+		return
+	}
 	local_lastIncludedIndex := rf.logIndex_global2local(index)
 	replace_logs := []LogType{}
 	replace_logs = append(replace_logs, LogType {
