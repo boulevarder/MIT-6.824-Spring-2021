@@ -1,5 +1,6 @@
 package shardctrler
 
+import "6.824/labgob"
 //
 // Shard controler: assigns shards to replication groups.
 //
@@ -28,6 +29,19 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+
+func init() {
+	labgob.Register(Config{})
+	labgob.Register(QueryArgs{})
+	labgob.Register(QueryReply{})
+	labgob.Register(JoinArgs{})
+	labgob.Register(JoinReply{})
+	labgob.Register(LeaveArgs{})
+	labgob.Register(MoveArgs{})
+	labgob.Register(LeaveReply{})
+	labgob.Register(MoveReply{})
+}
+
 const (
 	OK = "OK"
 )
@@ -36,6 +50,9 @@ type Err string
 
 type JoinArgs struct {
 	Servers map[int][]string // new GID -> servers mappings
+
+	Client_id	int
+	Command_id	int
 }
 
 type JoinReply struct {
@@ -45,6 +62,9 @@ type JoinReply struct {
 
 type LeaveArgs struct {
 	GIDs []int
+
+	Client_id	int
+	Command_id	int
 }
 
 type LeaveReply struct {
@@ -55,6 +75,9 @@ type LeaveReply struct {
 type MoveArgs struct {
 	Shard int
 	GID   int
+
+	Client_id	int
+	Command_id	int
 }
 
 type MoveReply struct {
@@ -64,6 +87,9 @@ type MoveReply struct {
 
 type QueryArgs struct {
 	Num int // desired config number
+
+	Client_id	int
+	Command_id	int
 }
 
 type QueryReply struct {
@@ -71,3 +97,13 @@ type QueryReply struct {
 	Err         Err
 	Config      Config
 }
+
+
+var (
+	redFormat		string = "\033[35m"
+	whiteFormat		string = "\033[37m"
+	blueFormat		string = "\033[1;34m"
+	warnFormat		string = "\033[1;33m"
+	redLightFormat	string = "\033[1;35m"
+	defaultFormat	string = "\033[0m"
+)
