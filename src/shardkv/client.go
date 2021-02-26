@@ -13,6 +13,10 @@ import "crypto/rand"
 import "math/big"
 import "6.824/shardctrler"
 import "time"
+import "sync"
+
+var clerk_lock sync.Mutex
+var clerk_index	int
 
 //
 // which shard is a key in?
@@ -40,6 +44,10 @@ type Clerk struct {
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+
+	mu sync.Mutex
+	client_id int
+	command_id int
 }
 
 //
@@ -68,6 +76,13 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+
+	ck.mu.Lock()
+	args.Command_id = ck.command_id
+	ck.command_id++
+	ck.mu.Unlock()
+	args.Client_id = ck.client_id 
+
 
 	for {
 		shard := key2shard(key)
@@ -105,6 +120,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Value = value
 	args.Op = op
 
+	ck.mu.Lock()
+	args.Command_id = ck.command_id
+	ck.command_id++
+	ck.mu.Unlock()
+	args.Client_id = ck.client_id 
 
 	for {
 		shard := key2shard(key)

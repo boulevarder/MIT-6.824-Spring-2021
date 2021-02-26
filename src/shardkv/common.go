@@ -27,6 +27,8 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Client_id	int
+	Command_id	int
 }
 
 type PutAppendReply struct {
@@ -36,9 +38,20 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	Client_id	int
+	Command_id	int
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
 }
+
+var (
+	redFormat		string = "\033[35m"
+	whiteFormat		string = "\033[37m"
+	blueFormat		string = "\033[1;34m"
+	warnFormat		string = "\033[1;33m"
+	redLightFormat	string = "\033[1;35m"
+	defaultFormat	string = "\033[0m"
+)
